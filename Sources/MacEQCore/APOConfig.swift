@@ -46,6 +46,9 @@ public func parseAPOConfig(_ text: String) throws -> EQPreset {
                 arguments.replacingOccurrences(of: "dB", with: "").trimmingCharacters(in: .whitespaces),
                 line: lineNumber, what: "preamp gain"
             )
+            guard preampDB.isFinite else {
+                throw APOParseError(line: lineNumber, message: "combined preamp gain must be finite")
+            }
         } else if command.hasPrefix("filter") {
             filters.append(try parseFilterLine(arguments, line: lineNumber))
         }
@@ -55,8 +58,8 @@ public func parseAPOConfig(_ text: String) throws -> EQPreset {
 }
 
 private func parseNumber(_ token: String, line: Int, what: String) throws -> Double {
-    guard let value = Double(token.replacingOccurrences(of: ",", with: ".")) else {
-        throw APOParseError(line: line, message: "expected a number for \(what), got '\(token)'")
+    guard let value = Double(token.replacingOccurrences(of: ",", with: ".")), value.isFinite else {
+        throw APOParseError(line: line, message: "expected a finite number for \(what), got '\(token)'")
     }
     return value
 }
@@ -126,7 +129,11 @@ private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpe
     }
     if q == nil, let bandwidthOctaves {
         // RBJ bandwidth-to-Q (midband approximation): 1/Q = 2·sinh(ln2/2 · N)
-        q = 1.0 / (2.0 * sinh(log(2.0) / 2.0 * bandwidthOctaves))
+        let derivedQ = 1.0 / (2.0 * sinh(log(2.0) / 2.0 * bandwidthOctaves))
+        guard derivedQ.isFinite else {
+            throw APOParseError(line: line, message: "bandwidth must produce a finite Q")
+        }
+        q = derivedQ
     }
     return FilterSpec(
         type: type,
@@ -168,7 +175,10 @@ public func serializeAPOConfig(_ preset: EQPreset) -> String {
 }
 
 private func formatFrequency(_ frequency: Double) -> String {
-    frequency == frequency.rounded()
-        ? String(Int(frequency))
-        : String(format: "%.1f", frequency)
+    // Presets can also be constructed directly, without going through the parser.
+    // Only use integer formatting when the conversion is exactly representable.
+    if let integer = Int(exactly: frequency) {
+        return String(integer)
+    }
+    return String(format: "%.1f", frequency)
 }
