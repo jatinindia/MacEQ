@@ -335,6 +335,96 @@ func testAPOParseErrors() {
     }
 }
 
+func testAPONumericValidation() {
+    func expectParseError(_ text: String, line: Int, label: String) {
+        do {
+            _ = try parseAPOConfig(text)
+            expect(false, "\(label) should be rejected")
+        } catch let error as APOParseError {
+            expect(error.line == line, "\(label) reports line \(line), got \(error.line)")
+        } catch {
+            expect(false, "\(label) returned the wrong error: \(error)")
+        }
+    }
+
+    for token in ["nan", "NaN", "inf", "-inf", "Infinity", "1e999"] {
+        let lines = [
+            "Preamp: \(token) dB",
+            "Filter 1: ON PK Fc \(token) Hz Gain 0 dB Q 1",
+            "Filter 1: OFF PK Fc 1000 Hz Gain \(token) dB Q 1",
+            "Filter 1: ON PK Fc 1000 Hz Gain 0 dB Q \(token)",
+            "Filter 1: ON PK Fc 1000 Hz Gain 0 dB BW Oct \(token)",
+        ]
+        for line in lines {
+            expectParseError("# preset\n" + line, line: 2, label: "non-finite numeric field")
+        }
+    }
+    let large = String(Double.greatestFiniteMagnitude)
+    expectParseError(
+        "Preamp: \(large) dB\nPreamp: \(large) dB",
+        line: 2, label: "overflow in accumulated preamp"
+    )
+    expectParseError(
+        "Filter 1: ON PK Fc 1000 Hz BW Oct 0",
+        line: 1, label: "non-finite bandwidth-derived Q"
+    )
+}
+
+func testAPOCompatibility() {
+    let text = """
+    Preamp: -2,5 dB
+    Preamp: 1 dB
+    Filter 1: ON PEQ Fc 105,5 Hz Gain -3,2 dB BW Oct 1
+    Filter 2: OFF HP Fc 10 Hz
+    Filter 3: ON PK Fc 1000 Hz Q 0.7 BW Oct 0
+    Include: ignored.txt
+    """
+    do {
+        let preset = try parseAPOConfig(text)
+        expectClose(preset.preampDB, -1.5, tolerance: 1e-9, "preamp lines accumulate")
+        expect(preset.filters.count == 3, "unknown directives remain ignored")
+        guard preset.filters.count == 3 else { return }
+        expect(preset.filters[0].type == .peaking, "PEQ alias remains supported")
+        expectClose(preset.filters[0].frequency, 105.5, tolerance: 1e-9, "decimal comma remains supported")
+        expectClose(preset.filters[0].q, sqrt(2.0), tolerance: 1e-9, "bandwidth converts to Q")
+        expect(!preset.filters[1].isEnabled, "disabled filter remains disabled")
+        expectClose(preset.filters[1].q, butterworthQ, tolerance: 1e-9, "omitted Q keeps default")
+        expectClose(preset.filters[2].q, 0.7, tolerance: 1e-9, "explicit Q takes precedence over bandwidth")
+    } catch {
+        expect(false, "compatible preset rejected: \(error)")
+    }
+}
+
+func testAPOSerializerNumericBoundaries() {
+    // The public model can bypass parsing. Formatting must not trap for any Double.
+    let frequencies = [
+        Double(Int.max), Double(Int.min), Double.greatestFiniteMagnitude,
+        -Double.greatestFiniteMagnitude, Double.infinity, -Double.infinity, Double.nan,
+    ]
+    for frequency in frequencies {
+        let preset = EQPreset(preampDB: 0, filters: [
+            FilterSpec(type: .peaking, isEnabled: true, frequency: frequency, gainDB: 0, q: 1),
+        ])
+        let text = serializeAPOConfig(preset)
+        expect(text.contains("Filter 1: ON PK Fc "), "direct-model formatting completes")
+        if frequency.isFinite {
+            do {
+                let parsed = try parseAPOConfig(text)
+                expect(parsed.filters.first?.frequency == frequency, "finite frequency round-trips")
+            } catch {
+                expect(false, "finite serialized frequency rejected: \(error)")
+            }
+        }
+    }
+    let ordinary = EQPreset(preampDB: 0, filters: [
+        FilterSpec(type: .peaking, isEnabled: true, frequency: 1000, gainDB: 0, q: 1),
+    ])
+    expect(
+        serializeAPOConfig(ordinary) == "Preamp: 0.0 dB\nFilter 1: ON PK Fc 1000 Hz Gain 0.0 dB Q 1.00\n",
+        "ordinary preset formatting remains unchanged"
+    )
+}
+
 func testAPORoundTrip() {
     let original = EQPreset(preampDB: -5.5, filters: [
         FilterSpec(type: .peaking, isEnabled: true, frequency: 105.5, gainDB: -4.0, q: 0.9),
@@ -367,6 +457,9 @@ testFilterTypeReferences()
 testFilterTypeMagnitudeSanity()
 testAPOParse()
 testAPOParseErrors()
+testAPONumericValidation()
+testAPOCompatibility()
+testAPOSerializerNumericBoundaries()
 testAPORoundTrip()
 testMagnitudeResponse()
 testAutoPreamp()
