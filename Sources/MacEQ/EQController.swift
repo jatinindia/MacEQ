@@ -358,6 +358,9 @@ final class EQController: ObservableObject {
         watchdogTimer = nil
         statusTimer?.invalidate()
         statusTimer = nil
+        // Retired, not just dropped: the audio thread may still hold it as its
+        // last-processed kernel, and its release must not be the final one.
+        retire(engine.kernelHolder.kernel)
         engine.kernelHolder.kernel = nil
         retireConvolver(engine.convolverHolder.convolver)
         engine.convolverHolder.convolver = nil
@@ -717,11 +720,13 @@ final class EQController: ObservableObject {
             return
         }
         let sampleRate = engine.status?.sampleRate ?? 48000
-        let cascade = activeCascade(sampleRate: sampleRate)
-        let preamp = autoPreampEnabled ? autoPreampDB(of: cascade, sampleRate: sampleRate) : manualPreampDB
+        let sections = activeCascade(sampleRate: sampleRate)
+        let preamp = autoPreampEnabled
+            ? autoPreampDB(of: sections.map(\.coefficients), sampleRate: sampleRate)
+            : manualPreampDB
         effectivePreampDB = preamp
         guard let kernel = EQKernel(
-            cascade: cascade, preampDB: preamp, sampleRate: sampleRate, maxChannels: 2,
+            sections: sections, preampDB: preamp, sampleRate: sampleRate, maxChannels: 2,
             limiterEnabled: limiterEnabled
         ) else {
             errorMessage = "EQKernel construction failed (bands: \(gains), preamp: \(preamp))"
@@ -731,28 +736,46 @@ final class EQController: ObservableObject {
         engine.kernelHolder.kernel = kernel
     }
 
+    /// Id of the pass-through stand-in section; matches no band or filter.
+    private static let passthroughSectionID = -1
+
     /// The biquad cascade for the current mode. Never empty: an identity peaking
     /// section stands in when the parametric list has no enabled filters.
-    func activeCascade(sampleRate: Double) -> [BiquadCoefficients] {
-        let sections: [BiquadCoefficients]
+    ///
+    /// Section ids are each band's (or filter's) position in its list, so a
+    /// slider or curve-point drag keeps its id, and its filter state, across the
+    /// kernel rebuild every tick triggers (EQKernel.adoptState). Parametric ids
+    /// count disabled filters too, so toggling one checkbox renumbers nothing.
+    /// Graphic and parametric ids overlap; a mode switch is a wholesale change
+    /// of curve anyway.
+    func activeCascade(sampleRate: Double) -> [KernelSection] {
+        let sections: [KernelSection]
         switch mode {
         case .graphic:
-            sections = zip(bands, gains).map { band, gain in
-                peakingCoefficients(sampleRate: sampleRate, frequency: band.frequency, q: Self.bandQ, gainDB: gain)
+            sections = zip(bands, gains).enumerated().map { index, band in
+                KernelSection(
+                    id: index,
+                    coefficients: peakingCoefficients(
+                        sampleRate: sampleRate, frequency: band.0.frequency, q: Self.bandQ, gainDB: band.1
+                    )
+                )
             }
         case .parametric:
-            sections = parametricFilters.filter(\.isEnabled).map {
-                coefficients(for: $0, sampleRate: sampleRate)
+            sections = parametricFilters.enumerated().filter { $0.element.isEnabled }.map {
+                KernelSection(id: $0.offset, coefficients: coefficients(for: $0.element, sampleRate: sampleRate))
             }
         }
         // Sections sitting at 0 dB are exactly H(z) = 1, so running them costs a
         // biquad per band per channel on every callback and changes nothing.
         // Dropping them makes a flat EQ nearly free, which matters most on Intel.
-        let active = sections.filter { !isIdentitySection($0) }
+        let active = sections.filter { !isIdentitySection($0.coefficients) }
         guard !active.isEmpty else {
             // The kernel needs a non-empty cascade; one identity section is the
             // cheapest way to say "pass through".
-            return [peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 1.0, gainDB: 0)]
+            return [KernelSection(
+                id: Self.passthroughSectionID,
+                coefficients: peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 1.0, gainDB: 0)
+            )]
         }
         return active
     }

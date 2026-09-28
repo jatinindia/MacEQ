@@ -148,7 +148,7 @@ func testKernelAppliesBandGainToSine() {
     let frameCount = 48000
     let frequency = 1000.0
     let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: frequency, q: 1.0, gainDB: 6.0)]
-    guard let kernel = EQKernel(cascade: cascade, preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
+    guard let kernel = EQKernel(sections: sectionsNumbered(cascade), preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
         expect(false, "kernel construction failed")
         return
     }
@@ -180,7 +180,7 @@ func testKernelLowBandsApplyGain() {
     let skip = 48000
     for (frequency, q) in [(31.5, 2.2), (63.0, 2.2), (125.0, 2.2)] {
         let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: frequency, q: q, gainDB: 12.0)]
-        guard let kernel = EQKernel(cascade: cascade, preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
+        guard let kernel = EQKernel(sections: sectionsNumbered(cascade), preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
             expect(false, "kernel construction failed for \(frequency) Hz")
             continue
         }
@@ -203,7 +203,7 @@ func testKernelLowBandsApplyGain() {
 func testKernelPreampScales() {
     let sampleRate = 48000.0
     let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 1.0, gainDB: 0.0)]
-    guard let kernel = EQKernel(cascade: cascade, preampDB: -6.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
+    guard let kernel = EQKernel(sections: sectionsNumbered(cascade), preampDB: -6.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false) else {
         expect(false, "kernel construction failed")
         return
     }
@@ -379,7 +379,7 @@ func testLimiterCatchesOvers() {
     let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 1.0, gainDB: 0.0)]
     // +12 dB preamp on a 0.5-amplitude sine would peak at ~2.0 without a limiter.
     guard let kernel = EQKernel(
-        cascade: cascade, preampDB: 12.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: true
+        sections: sectionsNumbered(cascade), preampDB: 12.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: true
     ) else {
         expect(false, "kernel construction failed")
         return
@@ -410,7 +410,7 @@ func testLimiterTransparentBelowThreshold() {
     let frameCount = 48000
     let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 1.0, gainDB: 0.0)]
     guard let kernel = EQKernel(
-        cascade: cascade, preampDB: 0.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: true
+        sections: sectionsNumbered(cascade), preampDB: 0.0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: true
     ) else {
         expect(false, "kernel construction failed")
         return
@@ -869,10 +869,10 @@ func testKernelWithDroppedIdentitySectionsMatchesFullCascade() {
     expect(pruned.count == 1, "two identity sections dropped, got \(pruned.count)")
 
     guard let fullKernel = EQKernel(
-            cascade: full, preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false
+            sections: sectionsNumbered(full), preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false
         ),
         let prunedKernel = EQKernel(
-            cascade: pruned, preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false
+            sections: sectionsNumbered(pruned), preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false
         )
     else {
         expect(false, "kernel construction failed")
@@ -956,7 +956,7 @@ func testBiquadStateReachesDenormalsDuringSilence() {
     let sampleRate = 48000.0
     let cascade = [peakingCoefficients(sampleRate: sampleRate, frequency: 125, q: 2.2, gainDB: 6)]
     guard let kernel = EQKernel(
-        cascade: cascade, preampDB: 0, sampleRate: sampleRate,
+        sections: sectionsNumbered(cascade), preampDB: 0, sampleRate: sampleRate,
         maxChannels: 2, limiterEnabled: false
     ) else {
         expect(false, "kernel construction failed")
@@ -1040,7 +1040,7 @@ func testFiltersAtOrAboveNyquistPassThroughStably() {
         }
 
         guard let kernel = EQKernel(
-            cascade: [graphicBand], preampDB: 0, sampleRate: sampleRate,
+            sections: sectionsNumbered([graphicBand]), preampDB: 0, sampleRate: sampleRate,
             maxChannels: 1, limiterEnabled: true
         ) else {
             expect(false, "kernel construction failed at \(sampleRate) Hz")
@@ -1131,10 +1131,145 @@ func testCallbackStallCounting() {
     expect(callbackStallTicksBeforeRestart == 2, "a stall needs two watchdog ticks (~4 s) without callbacks")
 }
 
+// MARK: - Kernel swaps (every slider tick builds a new kernel)
+
+/// Sections numbered by position, for kernels that are never swapped.
+func sectionsNumbered(_ cascade: [BiquadCoefficients]) -> [KernelSection] {
+    cascade.enumerated().map { KernelSection(id: $0.offset, coefficients: $0.element) }
+}
+
+func processContinuously(_ input: [Float], kernel: EQKernel, channelCount: Int) -> [Float] {
+    var output = input
+    output.withUnsafeMutableBufferPointer { buffer in
+        kernel.process(interleaved: buffer.baseAddress!, frameCount: buffer.count / channelCount, channelCount: channelCount)
+    }
+    return output
+}
+
+/// Runs `first` over the first half of `input`, then `second` over the rest
+/// after adopting `first`'s state: what the audio thread does when a slider
+/// tick swaps kernels mid-stream.
+func processWithSwap(_ input: [Float], first: EQKernel, second: EQKernel, channelCount: Int) -> [Float] {
+    var output = input
+    let frameCount = input.count / channelCount
+    let splitFrame = frameCount / 2
+    output.withUnsafeMutableBufferPointer { buffer in
+        first.process(interleaved: buffer.baseAddress!, frameCount: splitFrame, channelCount: channelCount)
+        second.adoptState(from: first)
+        second.process(
+            interleaved: buffer.baseAddress! + splitFrame * channelCount,
+            frameCount: frameCount - splitFrame,
+            channelCount: channelCount
+        )
+    }
+    return output
+}
+
+func maxAbsoluteDifference(_ a: [Float], _ b: [Float]) -> Float {
+    zip(a, b).map { abs($0 - $1) }.max() ?? 0
+}
+
+/// A fresh kernel starts its filters and limiter from silence; swapped in
+/// mid-song that is an audible click. Carrying state over must make a swap to
+/// identical filters indistinguishable from never swapping at all, limiter
+/// included.
+func testKernelSwapWithSameFiltersIsSeamless() {
+    let sampleRate = 48000.0
+    let sections = [
+        KernelSection(id: 0, coefficients: peakingCoefficients(sampleRate: sampleRate, frequency: 63, q: 2.2, gainDB: 9)),
+        KernelSection(id: 1, coefficients: peakingCoefficients(sampleRate: sampleRate, frequency: 1000, q: 2.2, gainDB: -4)),
+    ]
+    // +6 dB preamp on a full-scale signal keeps the limiter busy at the swap.
+    func makeKernel() -> EQKernel? {
+        EQKernel(sections: sections, preampDB: 6, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: true)
+    }
+    guard let reference = makeKernel(), let first = makeKernel(), let second = makeKernel() else {
+        expect(false, "kernel construction failed")
+        return
+    }
+    let input = pseudoRandomSignal(count: 9600 * 2, seed: 5)
+    let expected = processContinuously(input, kernel: reference, channelCount: 2)
+    let swapped = processWithSwap(input, first: first, second: second, channelCount: 2)
+    let difference = maxAbsoluteDifference(expected, swapped)
+    expect(difference < 1e-6, "swap to identical filters is seamless, max deviation \(difference)")
+}
+
+/// A band at 0 dB is pruned from the cascade, so dragging a slider across 0 dB
+/// adds or removes a section, and the other sections shift position. Carrying
+/// state by section id (not position) must make both directions seamless.
+func testKernelSwapAcrossPrunedSectionIsSeamless() {
+    let sampleRate = 48000.0
+    let low = KernelSection(id: 0, coefficients: peakingCoefficients(sampleRate: sampleRate, frequency: 125, q: 2.2, gainDB: 6))
+    let passthrough = KernelSection(id: 1, coefficients: identityCoefficients)
+    let high = KernelSection(id: 2, coefficients: peakingCoefficients(sampleRate: sampleRate, frequency: 4000, q: 2.2, gainDB: -3))
+    let pruned = [low, high]
+    let full = [low, passthrough, high]
+    let input = pseudoRandomSignal(count: 9600 * 2, seed: 8).map { $0 * 0.5 }
+    for (firstSections, secondSections, label) in [(pruned, full, "band leaving 0 dB"), (full, pruned, "band reaching 0 dB")] {
+        func makeKernel(_ sections: [KernelSection]) -> EQKernel? {
+            EQKernel(sections: sections, preampDB: 0, sampleRate: sampleRate, maxChannels: 2, limiterEnabled: false)
+        }
+        guard let reference = makeKernel(firstSections),
+              let first = makeKernel(firstSections),
+              let second = makeKernel(secondSections)
+        else {
+            expect(false, "kernel construction failed (\(label))")
+            continue
+        }
+        let expected = processContinuously(input, kernel: reference, channelCount: 2)
+        let swapped = processWithSwap(input, first: first, second: second, channelCount: 2)
+        let difference = maxAbsoluteDifference(expected, swapped)
+        expect(difference < 1e-6, "\(label): swap is seamless, max deviation \(difference)")
+    }
+}
+
+/// With Auto preamp on, every slider tick can change the preamp too. A gain
+/// step multiplies the waveform instantly, which ticks on loud material, so
+/// the first buffer after a swap ramps from the old gain to the new one.
+func testKernelSwapRampsPreampChange() {
+    let sections = [KernelSection(id: 0, coefficients: identityCoefficients)]
+    let halfGainDB = 20 * log10(0.5)
+    guard let first = EQKernel(sections: sections, preampDB: 0, sampleRate: 48000, maxChannels: 2, limiterEnabled: false),
+          let second = EQKernel(sections: sections, preampDB: halfGainDB, sampleRate: 48000, maxChannels: 2, limiterEnabled: false)
+    else {
+        expect(false, "kernel construction failed")
+        return
+    }
+    let frameCount = 512
+    var before = [Float](repeating: 0.5, count: frameCount * 2)
+    var during = before
+    var after = before
+    before.withUnsafeMutableBufferPointer {
+        first.process(interleaved: $0.baseAddress!, frameCount: frameCount, channelCount: 2)
+    }
+    second.adoptState(from: first)
+    during.withUnsafeMutableBufferPointer {
+        second.process(interleaved: $0.baseAddress!, frameCount: frameCount, channelCount: 2)
+    }
+    after.withUnsafeMutableBufferPointer {
+        second.process(interleaved: $0.baseAddress!, frameCount: frameCount, channelCount: 2)
+    }
+    expect(during[0] > 0.49, "first sample after the swap is still at the old level, not a step: \(during[0])")
+    var isMonotonic = true
+    for frame in 1..<frameCount where during[frame * 2] > during[(frame - 1) * 2] {
+        isMonotonic = false
+    }
+    expect(isMonotonic, "the ramp only moves toward the new gain")
+    expectClose(Double(during[(frameCount - 1) * 2]), 0.25, tolerance: 0.002, "ramp arrives at the new gain")
+    expect(
+        (0..<frameCount).allSatisfy { during[$0 * 2] == during[$0 * 2 + 1] },
+        "both channels ramp together"
+    )
+    expect(after.allSatisfy { abs($0 - 0.25) < 1e-4 }, "after the ramp the new gain holds steady")
+}
+
 testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
 testEngineRestartDelayBacksOff()
 testCallbackStallCounting()
+testKernelSwapWithSameFiltersIsSeamless()
+testKernelSwapAcrossPrunedSectionIsSeamless()
+testKernelSwapRampsPreampChange()
 
 if failureCount > 0 {
     print("\(failureCount) of \(expectationCount) expectations FAILED")

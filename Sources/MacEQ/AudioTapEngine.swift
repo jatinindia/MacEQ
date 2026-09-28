@@ -42,6 +42,11 @@ private func disableDenormalsOnCurrentThread() {
 /// thread's release can never be the final one.
 final class KernelHolder {
     var kernel: EQKernel?
+    /// Audio thread only (while IO runs): the kernel the last callback ran, so
+    /// a newly swapped-in kernel can continue from its state (EQKernel.adoptState)
+    /// instead of restarting its filters from silence. Cleared by the engine
+    /// once IO has stopped.
+    var lastProcessedKernel: EQKernel?
 }
 
 /// Hands the active FIR convolver to the audio thread; nil means no convolution.
@@ -310,7 +315,19 @@ final class AudioTapEngine {
                         applyConvolver(convolver, output: outOutputData)
                     }
                     if let kernel = kernelHolder.kernel {
+                        if kernel !== kernelHolder.lastProcessedKernel {
+                            if let previous = kernelHolder.lastProcessedKernel {
+                                kernel.adoptState(from: previous)
+                            }
+                            // Not the final release of the old kernel: the
+                            // controller's retire list still holds it.
+                            kernelHolder.lastProcessedKernel = kernel
+                        }
                         applyKernel(kernel, output: outOutputData)
+                    } else if kernelHolder.lastProcessedKernel != nil {
+                        // Bypassed: that state goes stale, so the kernel after
+                        // bypass starts fresh rather than from old history.
+                        kernelHolder.lastProcessedKernel = nil
                     }
                     if captureRing.captureEnabled {
                         captureOutput(outOutputData, into: captureRing)
@@ -410,6 +427,10 @@ final class AudioTapEngine {
             AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
             self.ioProcID = nil
         }
+        // IO has stopped, so the audio thread no longer touches this. The next
+        // start may run at another sample rate; its kernel must not adopt
+        // state from this session's.
+        kernelHolder.lastProcessedKernel = nil
         if aggregateID != AudioObjectID(kAudioObjectUnknown) {
             AudioHardwareDestroyAggregateDevice(aggregateID)
             aggregateID = AudioObjectID(kAudioObjectUnknown)
