@@ -59,18 +59,27 @@ public final class SpectrumAnalyzer {
             vDSP_vmul(pointer.baseAddress! + offset, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
         }
         // Pack real signal into split-complex (even -> real, odd -> imag) for zrop.
-        windowed.withUnsafeBufferPointer { pointer in
-            pointer.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { complex in
-                var split = DSPSplitComplex(
-                    realp: &realInput,
-                    imagp: &imagInput
-                )
-                vDSP_ctoz(complex, 2, &split, 1, vDSP_Length(fftSize / 2))
+        // The split-complex pointers must stay valid for the whole vDSP call, so
+        // they come from scoped buffer pointers rather than inout-to-pointer
+        // conversions (which are only valid during the DSPSplitComplex init).
+        let halfLength = vDSP_Length(fftSize / 2)
+        realInput.withUnsafeMutableBufferPointer { real in
+            imagInput.withUnsafeMutableBufferPointer { imag in
+                var split = DSPSplitComplex(realp: real.baseAddress!, imagp: imag.baseAddress!)
+                windowed.withUnsafeBufferPointer { pointer in
+                    pointer.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize / 2) { complex in
+                        vDSP_ctoz(complex, 2, &split, 1, halfLength)
+                    }
+                }
             }
         }
         vDSP_DFT_Execute(setup, realInput, imagInput, &realOutput, &imagOutput)
-        var split = DSPSplitComplex(realp: &realOutput, imagp: &imagOutput)
-        vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
+        realOutput.withUnsafeMutableBufferPointer { real in
+            imagOutput.withUnsafeMutableBufferPointer { imag in
+                var split = DSPSplitComplex(realp: real.baseAddress!, imagp: imag.baseAddress!)
+                vDSP_zvmags(&split, 1, &magnitudes, 1, halfLength)
+            }
+        }
 
         // Calibration: sine of amplitude A at bin k gives |X_k| = A * N/2 * CG * 2
         // (zrop scales by 2), with Hann coherent gain CG = 0.5 -> |X_k| = A * N/2.
@@ -85,6 +94,10 @@ public final class SpectrumAnalyzer {
                 ? bandFrequencies[bandIndex + 1]
                 : sampleRate / 2
             let firstBin = max(Int(bandLow / binWidth), 1)
+            // A band starting at or above Nyquist has no bins at all. The
+            // display bands run to 20 kHz, so this is every sample rate below
+            // 40 kHz, e.g. Bluetooth headsets at 16/24 kHz during calls.
+            guard firstBin < binCount else { return floorDB }
             let lastBin = min(max(Int(bandHigh / binWidth), firstBin), binCount - 1)
             var peak: Float = 0
             for bin in firstBin...lastBin where magnitudes[bin] > peak {

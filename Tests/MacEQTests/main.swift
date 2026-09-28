@@ -1016,6 +1016,93 @@ testIdentitySectionDetection()
 testKernelWithDroppedIdentitySectionsMatchesFullCascade()
 testBiquadStateReachesDenormalsDuringSilence()
 
+// MARK: - Filters at or above Nyquist
+
+/// Bluetooth headsets drop to 16/24 kHz while their mic is in use, which puts
+/// the 16 kHz graphic band (and AutoEQ's 10 kHz shelves) at or above Nyquist.
+/// There the RBJ formulas place a pole outside the unit circle, the output
+/// grows without bound, and the audio turns to inf/NaN until the next rebuild.
+/// Such a section must pass audio through instead.
+func testFiltersAtOrAboveNyquistPassThroughStably() {
+    for sampleRate in [16000.0, 22050.0, 24000.0, 32000.0] {
+        let graphicBand = peakingCoefficients(sampleRate: sampleRate, frequency: 16000, q: 2.2, gainDB: 3)
+        expect(
+            isIdentitySection(graphicBand),
+            "16 kHz graphic band at \(sampleRate) Hz should be identity, got \(graphicBand)"
+        )
+        for type in FilterType.allCases {
+            let spec = FilterSpec(type: type, isEnabled: true, frequency: 16000, gainDB: 3, q: 0.7)
+            let section = coefficients(for: spec, sampleRate: sampleRate)
+            expect(
+                isIdentitySection(section),
+                "\(type.rawValue) at 16 kHz / \(sampleRate) Hz should be identity, got \(section)"
+            )
+        }
+
+        guard let kernel = EQKernel(
+            cascade: [graphicBand], preampDB: 0, sampleRate: sampleRate,
+            maxChannels: 1, limiterEnabled: true
+        ) else {
+            expect(false, "kernel construction failed at \(sampleRate) Hz")
+            continue
+        }
+        // Half scale, so the limiter never engages and any deviation is the filter's.
+        let input = pseudoRandomSignal(count: Int(sampleRate), seed: 11).map { $0 * 0.5 }
+        var output = input
+        output.withUnsafeMutableBufferPointer { pointer in
+            kernel.process(interleaved: pointer.baseAddress!, frameCount: pointer.count, channelCount: 1)
+        }
+        expect(output.allSatisfy(\.isFinite), "kernel output stays finite at \(sampleRate) Hz")
+        let maxDeviation = zip(input, output).map { abs($0 - $1) }.max() ?? 0
+        expect(
+            maxDeviation < 1e-6,
+            "above-Nyquist band passes audio through at \(sampleRate) Hz, deviation \(maxDeviation)"
+        )
+    }
+
+    // Just below Nyquist the filter is still realizable and must stay active.
+    let belowNyquist = peakingCoefficients(sampleRate: 24000, frequency: 11000, q: 2.2, gainDB: 3)
+    expect(!isIdentitySection(belowNyquist), "11 kHz band at 24 kHz is still a real filter")
+}
+
+// MARK: - Spectrum analyzer below 40 kHz
+
+/// The display bands run to 20 kHz. Below a 40 kHz sample rate the top bands
+/// start above Nyquist, where there are no FFT bins at all.
+func testSpectrumAnalyzerAtLowSampleRates() {
+    guard let analyzer = SpectrumAnalyzer(fftSize: 2048) else {
+        expect(false, "analyzer construction failed")
+        return
+    }
+    let bands = logSpacedFrequencies(from: 20, to: 20000, count: 48)
+    for sampleRate in [16000.0, 24000.0, 32000.0] {
+        var samples = [Float](repeating: 0, count: 4096)
+        for index in samples.indices {
+            samples[index] = Float(sin(2.0 * Double.pi * 1000.0 * Double(index) / sampleRate))
+        }
+        let spectrum = analyzer.bandMagnitudesDB(samples: samples, sampleRate: sampleRate, bandFrequencies: bands)
+        expect(spectrum.count == bands.count, "one magnitude per band at \(sampleRate) Hz")
+        for (index, band) in bands.enumerated() where band >= sampleRate / 2 {
+            expect(
+                spectrum[index] == -100,
+                "band \(band) Hz is above Nyquist at \(sampleRate) Hz and should read the floor, got \(spectrum[index])"
+            )
+        }
+        guard let peakIndex = spectrum.indices.max(by: { spectrum[$0] < spectrum[$1] }) else {
+            expect(false, "no spectrum peak at \(sampleRate) Hz")
+            continue
+        }
+        let peakBandHigh = peakIndex + 1 < bands.count ? bands[peakIndex + 1] : sampleRate / 2
+        expect(
+            bands[peakIndex] <= 1000 && 1000 <= peakBandHigh,
+            "peak band [\(bands[peakIndex]), \(peakBandHigh)] should contain 1 kHz at \(sampleRate) Hz"
+        )
+    }
+}
+
+testFiltersAtOrAboveNyquistPassThroughStably()
+testSpectrumAnalyzerAtLowSampleRates()
+
 if failureCount > 0 {
     print("\(failureCount) of \(expectationCount) expectations FAILED")
     exit(1)

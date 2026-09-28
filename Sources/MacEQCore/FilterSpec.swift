@@ -56,7 +56,11 @@ public struct FilterSpec: Equatable {
 public let butterworthQ = 1.0 / 2.0.squareRoot()
 
 /// RBJ Audio EQ Cookbook coefficients for any supported filter type.
+/// Identity at or above Nyquist, where no type is realizable (see isBelowNyquist).
 public func coefficients(for spec: FilterSpec, sampleRate: Double) -> BiquadCoefficients {
+    guard isBelowNyquist(frequency: spec.frequency, sampleRate: sampleRate) else {
+        return identityCoefficients
+    }
     let omega = 2.0 * Double.pi * spec.frequency / sampleRate
     let cosOmega = cos(omega)
     let sinOmega = sin(omega)

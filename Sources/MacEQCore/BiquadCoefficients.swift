@@ -21,8 +21,26 @@ public struct BiquadCoefficients: Equatable {
     }
 }
 
-/// RBJ Audio EQ Cookbook peaking filter.
+/// H(z) = 1: passes audio through unchanged.
+public let identityCoefficients = BiquadCoefficients(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0)
+
+/// Whether a filter at `frequency` can be realized at `sampleRate`.
+///
+/// At or above Nyquist the RBJ formulas put a pole on or outside the unit
+/// circle, and the filter's output grows without bound. That happens in
+/// practice: Bluetooth headsets drop to 16/24 kHz while their mic is in use,
+/// which pushes the 16 kHz graphic band (and typical AutoEQ treble shelves)
+/// past Nyquist. Such a filter could only act on content the stream cannot
+/// carry, so the caller substitutes identity.
+func isBelowNyquist(frequency: Double, sampleRate: Double) -> Bool {
+    frequency < sampleRate / 2
+}
+
+/// RBJ Audio EQ Cookbook peaking filter. Identity at or above Nyquist.
 public func peakingCoefficients(sampleRate: Double, frequency: Double, q: Double, gainDB: Double) -> BiquadCoefficients {
+    guard isBelowNyquist(frequency: frequency, sampleRate: sampleRate) else {
+        return identityCoefficients
+    }
     let amplitude = pow(10.0, gainDB / 40.0)
     let omega = 2.0 * Double.pi * frequency / sampleRate
     let alpha = sin(omega) / (2.0 * q)
