@@ -25,20 +25,75 @@ public struct APOParseError: Error, CustomStringConvertible, Equatable {
     public var description: String { "line \(line): \(message)" }
 }
 
-/// Parses APO config.txt text. Unknown commands (Device:, Include:, ...) are
-/// skipped for forward compatibility; malformed Preamp/Filter lines throw.
-/// Decimal commas (European exports) are accepted alongside decimal points.
-public func parseAPOConfig(_ text: String) throws -> EQPreset {
+/// A line the importer left out because it doesn't affect MacEQ's sound, kept
+/// so the user can be told what was skipped.
+public struct APOSkippedLine: Equatable {
+    public let line: Int
+    public let text: String
+
+    public init(line: Int, text: String) {
+        self.line = line
+        self.text = text
+    }
+}
+
+public struct APOParseResult: Equatable {
+    public let preset: EQPreset
+    public let skippedLines: [APOSkippedLine]
+
+    public init(preset: EQPreset, skippedLines: [APOSkippedLine]) {
+        self.preset = preset
+        self.skippedLines = skippedLines
+    }
+}
+
+/// One sentence telling the user what an import left out, or nil if nothing.
+public func describeSkippedLines(_ lines: [APOSkippedLine]) -> String? {
+    guard !lines.isEmpty else { return nil }
+    let shown = lines.prefix(3).map { "line \($0.line) “\($0.text)”" }
+    let remainder = lines.count - shown.count
+    let list = shown.joined(separator: ", ") + (remainder > 0 ? ", and \(remainder) more" : "")
+    return "Skipped \(lines.count) \(lines.count == 1 ? "line" : "lines") MacEQ doesn't use: \(list)."
+}
+
+/// Equalizer APO commands MacEQ can't carry out and whose absence changes the
+/// sound, so importing the rest would give a preset that sounds different
+/// from the file. (GraphicEQ and Channel get their own handling below.)
+private let unsupportedCommands: Set<String> = [
+    "delay", "copy", "include", "convolution", "eval",
+    "if", "elseif", "else", "endif", "loudnesscorrection", "vstplugin",
+]
+
+/// Parses APO config.txt text (AutoEQ, REW, Peace and hand-written exports).
+///
+/// Nothing is dropped silently:
+/// - Preamp and Filter lines are applied; REW's empty "None" filter slots are
+///   placeholders and are passed over.
+/// - Commands that would change the sound but that MacEQ can't carry out
+///   (GraphicEQ, Delay, Include, per-channel Channel sections, ...) throw,
+///   naming the line.
+/// - Anything else (Device:, Stage:, REW's header lines, unknown text) doesn't
+///   affect the sound on a Mac; it is skipped and returned in `skippedLines`
+///   so the caller can say so.
+///
+/// Fields may be separated by any whitespace. Decimal commas (European
+/// exports) are accepted alongside decimal points.
+public func parseAPOConfig(_ text: String) throws -> APOParseResult {
     var preampDB = 0.0
     var filters: [FilterSpec] = []
+    var skippedLines: [APOSkippedLine] = []
 
     for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
         let lineNumber = index + 1
         let line = rawLine.trimmingCharacters(in: .whitespaces)
         guard !line.isEmpty, !line.hasPrefix("#") else { continue }
-        guard let colon = line.firstIndex(of: ":") else { continue }
+        guard let colon = line.firstIndex(of: ":") else {
+            skippedLines.append(APOSkippedLine(line: lineNumber, text: line))
+            continue
+        }
 
-        let command = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+        let commandName = line[..<colon].trimmingCharacters(in: .whitespaces)
+        let command = commandName.lowercased()
         let arguments = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
 
         if command == "preamp" {
@@ -47,11 +102,44 @@ public func parseAPOConfig(_ text: String) throws -> EQPreset {
                 line: lineNumber, what: "preamp gain"
             )
         } else if command.hasPrefix("filter") {
-            filters.append(try parseFilterLine(arguments, line: lineNumber))
+            if let filter = try parseFilterLine(arguments, line: lineNumber) {
+                filters.append(filter)
+            }
+        } else if command == "channel" {
+            try requireBothChannels(arguments, line: lineNumber)
+        } else if command == "graphiceq" {
+            throw APOParseError(
+                line: lineNumber,
+                message: "GraphicEQ isn't supported, and leaving it out would change how this preset sounds. "
+                    + "For AutoEQ, import the ParametricEQ.txt file instead."
+            )
+        } else if unsupportedCommands.contains(command) {
+            throw APOParseError(
+                line: lineNumber,
+                message: "\(commandName) isn't supported, and leaving it out would change how this preset sounds"
+            )
+        } else {
+            skippedLines.append(APOSkippedLine(line: lineNumber, text: line))
         }
-        // Anything else (Device:, Channel:, Include:, GraphicEQ:, ...) is skipped.
     }
-    return EQPreset(preampDB: preampDB, filters: filters)
+    return APOParseResult(preset: EQPreset(preampDB: preampDB, filters: filters), skippedLines: skippedLines)
+}
+
+/// MacEQ runs one filter chain on both channels. A Channel: selection covering
+/// both left and right (all, L R, 1 2; other channels don't exist on a stereo
+/// output) is exactly that. Anything narrower means per-channel filters,
+/// which would otherwise land on both ears.
+private func requireBothChannels(_ arguments: String, line: Int) throws {
+    let names = Set(arguments.split(whereSeparator: \.isWhitespace).map { $0.uppercased() })
+    let coversLeft = names.contains("L") || names.contains("1")
+    let coversRight = names.contains("R") || names.contains("2")
+    guard names.contains("ALL") || (coversLeft && coversRight) else {
+        throw APOParseError(
+            line: line,
+            message: "Channel: \(arguments) applies filters to only some channels, but MacEQ applies "
+                + "one filter chain to both channels, so this preset can't be imported as intended"
+        )
+    }
 }
 
 /// Parses one number. Double() also accepts "nan" and "inf", which would pass
@@ -64,8 +152,9 @@ private func parseNumber(_ token: String, line: Int, what: String) throws -> Dou
 }
 
 /// Parses the part after "Filter n:", e.g. "ON PK Fc 105 Hz Gain -4.0 dB Q 0.90".
-private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpec {
-    var tokens = arguments.split(separator: " ").map(String.init)
+/// Returns nil for REW's unused slots ("ON None"), which define no filter.
+private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpec? {
+    var tokens = arguments.split(whereSeparator: \.isWhitespace).map(String.init)
     guard !tokens.isEmpty else {
         throw APOParseError(line: line, message: "empty filter definition")
     }
@@ -80,6 +169,7 @@ private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpe
     }
 
     let typeCode = tokens.removeFirst().uppercased()
+    guard typeCode != "NONE" else { return nil }
     let type: FilterType
     if let known = FilterType(rawValue: typeCode) {
         type = known

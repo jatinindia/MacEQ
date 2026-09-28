@@ -70,9 +70,12 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
   output device and inside named presets.
 - **Full parametric EQ** — 12 filter types, unlimited bands, a draggable
   response curve with a live spectrum analyzer behind it.
-- **AutoEQ support** — free correction profiles for 5000+ headphone models
-  import directly. Equalizer APO's `config.txt` is MacEQ's native preset format,
-  so anything from the Windows EQ ecosystem drops straight in.
+- **AutoEQ and REW support** — free correction profiles for 5000+ headphone
+  models, and Room EQ Wizard filter exports, import directly. Equalizer APO's
+  `config.txt` is MacEQ's native preset format. Anything a preset needs that
+  MacEQ can't do (per-ear filters, GraphicEQ, delays) is refused with an
+  explanation rather than silently left out — see
+  [Importing presets](#importing-presets).
 - **Named presets** — save a tuning, switch between tunings in one click.
 - **Per-device profiles** — your headphone tuning and your speaker tuning are
   remembered separately and swap automatically when you change output device.
@@ -146,7 +149,28 @@ its `ParametricEQ.txt`, and either:
 - copy the text, then in MacEQ: Parametric → **Edit as text** → paste, or
 - download the file and use **⋯ → Import Preset…**
 
-Your headphones now measure closer to a neutral target.
+Your headphones now measure closer to a neutral target. Use the
+`ParametricEQ.txt` file, not `GraphicEQ.txt`: MacEQ can't import graphic
+curves.
+
+## Importing presets
+
+MacEQ reads Equalizer APO `config.txt` files, which is what AutoEQ, Room EQ
+Wizard (**File → Export → Filter Settings as text**) and Peace produce. An import
+never silently changes how a preset sounds:
+
+- **Applied:** `Preamp` and `Filter` lines, all 12 filter types. REW's unused
+  `None` filter slots are passed over. `Channel: all` (or `L R`) is fine.
+- **Refused, naming the line:** anything whose absence would change the sound:
+  `Channel:` sections for one ear only (MacEQ runs one filter chain on both
+  channels), `GraphicEQ`, `Delay`, `Copy`, `Include`, `Convolution`, `Eval`,
+  `If`/`Else`, `LoudnessCorrection`, `VSTPlugin`.
+- **Skipped, and listed under the editor:** lines that don't affect the sound on
+  a Mac, such as `Device:`, `Stage:` and REW's header lines.
+
+Values are checked too: a filter with a Q of 0, a frequency of 0 or below, or a
+value like `nan` is refused with its line number, since it would silence the
+output.
 
 ## Privacy and security
 

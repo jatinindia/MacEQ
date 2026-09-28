@@ -108,6 +108,9 @@ final class EQController: ObservableObject {
     }
     /// Last parse error from the config text editor, shown inline.
     @Published var configParseError: String?
+    /// What the last successful paste/import left out (lines that don't affect
+    /// the sound), shown under the parametric editor. nil when nothing was.
+    @Published private(set) var configImportNotice: String?
     @Published var convolutionEnabled: Bool {
         didSet {
             guard !isApplyingProfile else { return }
@@ -199,7 +202,7 @@ final class EQController: ObservableObject {
         limiterEnabled = defaults.object(forKey: "limiterEnabled") as? Bool ?? true
         // Parametric state persists in the native APO config.txt format.
         if let storedConfig = defaults.string(forKey: "parametricConfig"),
-           let preset = try? parseAPOConfig(storedConfig) {
+           let preset = try? parseAPOConfig(storedConfig).preset {
             parametricFilters = preset.filters
         } else {
             parametricFilters = []
@@ -496,7 +499,7 @@ final class EQController: ObservableObject {
         manualPreampDB = profile.manualPreampDB
         autoPreampEnabled = profile.autoPreampEnabled
         eqEnabled = profile.eqEnabled
-        if let preset = try? parseAPOConfig(profile.parametricConfig) {
+        if let preset = try? parseAPOConfig(profile.parametricConfig).preset {
             parametricFilters = preset.filters
         }
         if let path = profile.impulseResponsePath {
@@ -555,11 +558,14 @@ final class EQController: ObservableObject {
     }
 
     /// Applies edited/pasted APO config text (also the AutoEQ import path).
-    /// Sets `configParseError` instead of throwing so the editor can show it inline.
+    /// Sets `configParseError` instead of throwing so the editor can show it
+    /// inline, and `configImportNotice` when lines were skipped.
     func applyConfigText(_ text: String) {
         do {
-            let preset = try parseAPOConfig(text)
+            let result = try parseAPOConfig(text)
+            let preset = result.preset
             configParseError = nil
+            configImportNotice = describeSkippedLines(result.skippedLines)
             autoPreampEnabled = false
             manualPreampDB = preset.preampDB
             parametricFilters = preset.filters
@@ -640,7 +646,7 @@ final class EQController: ObservableObject {
         mode = EQMode(rawValue: preset.mode) ?? mode
         manualPreampDB = preset.manualPreampDB
         autoPreampEnabled = preset.autoPreampEnabled
-        if let parsed = try? parseAPOConfig(preset.parametricConfig) {
+        if let parsed = try? parseAPOConfig(preset.parametricConfig).preset {
             parametricFilters = parsed.filters
         }
         isApplyingProfile = false

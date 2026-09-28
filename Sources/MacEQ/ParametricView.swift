@@ -32,6 +32,15 @@ struct ParametricView: View {
                 bandTable
             }
 
+            // Shown under both views: a file import lands on the band table.
+            if let notice = controller.configImportNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+
             HStack(spacing: 4) {
                 Image(systemName: "lightbulb")
                     .font(.system(size: 9))

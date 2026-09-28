@@ -297,7 +297,7 @@ func testAPOParse() {
     Filter 5: ON HSC Fc 10000 Hz Gain -5.4 dB Q 0.70
     """
     do {
-        let preset = try parseAPOConfig(text)
+        let preset = try parseAPOConfig(text).preset
         expectClose(preset.preampDB, -6.8, tolerance: 1e-9, "preamp parsed")
         expect(preset.filters.count == 5, "5 filters parsed, got \(preset.filters.count)")
         guard preset.filters.count == 5 else { return }
@@ -343,7 +343,7 @@ func testAPORoundTrip() {
         FilterSpec(type: .notch, isEnabled: true, frequency: 50, gainDB: 0, q: 30),
     ])
     do {
-        let reparsed = try parseAPOConfig(serializeAPOConfig(original))
+        let reparsed = try parseAPOConfig(serializeAPOConfig(original)).preset
         expectClose(reparsed.preampDB, original.preampDB, tolerance: 0.01, "round-trip preamp")
         expect(reparsed.filters.count == original.filters.count, "round-trip filter count")
         for (index, pair) in zip(reparsed.filters, original.filters).enumerated() {
@@ -1533,7 +1533,7 @@ func testAPOParseRejectsInvalidValues() {
     ]
     for (text, line, label) in cases {
         do {
-            let preset = try parseAPOConfig(text)
+            let preset = try parseAPOConfig(text).preset
             expect(false, "\(label): should be rejected, parsed \(preset)")
         } catch let error as APOParseError {
             expect(error.line == line, "\(label): error names line \(line), got \(error.line) (\(error))")
@@ -1543,6 +1543,134 @@ func testAPOParseRejectsInvalidValues() {
     }
 }
 
+// MARK: - Importer: what it refuses, skips and reports
+
+func expectImportRefused(_ text: String, line: Int, mentioning phrase: String, _ label: String) {
+    do {
+        let result = try parseAPOConfig(text)
+        expect(false, "\(label): should be refused, parsed \(result.preset)")
+    } catch let error as APOParseError {
+        expect(error.line == line, "\(label): error names line \(line), got \(error.line)")
+        expect(
+            error.message.localizedCaseInsensitiveContains(phrase),
+            "\(label): message should mention '\(phrase)', got '\(error.message)'"
+        )
+    } catch {
+        expect(false, "\(label): expected APOParseError, got \(error)")
+    }
+}
+
+/// REW's "Filter Settings as text" export: header lines (some with colons),
+/// runs of spaces, and unused slots written as "None". Tabs added too.
+func testAPOImportFromREW() {
+    let text = """
+    Filter Settings file
+
+    Room EQ V5.31
+    Dated: 28-Sep-2026 21:04:11
+
+    Notes:
+
+    Equaliser: Generic
+    Average 1
+    Filter  1: ON  PK       Fc   48.8 Hz  Gain  -9.4 dB  Q  5.36
+    Filter  2: ON\tPK\tFc\t120 Hz\tGain\t-3.0 dB\tQ\t2.00
+    Filter  3: ON  None
+    Filter  4: OFF None
+    """
+    do {
+        let result = try parseAPOConfig(text)
+        let filters = result.preset.filters
+        expect(filters.count == 2, "two real filters; None slots are empty, got \(filters.count)")
+        guard filters.count == 2 else { return }
+        expectClose(filters[0].frequency, 48.8, tolerance: 1e-9, "space-padded Fc")
+        expectClose(filters[0].q, 5.36, tolerance: 1e-9, "space-padded Q")
+        expectClose(filters[1].frequency, 120, tolerance: 1e-9, "tab-separated Fc")
+        expectClose(filters[1].gainDB, -3.0, tolerance: 1e-9, "tab-separated gain")
+        expect(
+            result.skippedLines.map(\.line) == [1, 3, 4, 6, 8, 9],
+            "header lines are reported as skipped, got \(result.skippedLines.map(\.line))"
+        )
+        expect(
+            result.skippedLines.first?.text == "Filter Settings file",
+            "skipped lines keep their text, got \(String(describing: result.skippedLines.first))"
+        )
+    } catch {
+        expect(false, "REW export should import, threw \(error)")
+    }
+}
+
+func testAPOChannelScoping() {
+    let filter = "Filter 1: ON PK Fc 100 Hz Gain 3 dB Q 1"
+    for selection in ["all", "L R", "R L", "1 2", "l r", "L R C SUB"] {
+        do {
+            let result = try parseAPOConfig("Channel: \(selection)\n\(filter)")
+            expect(result.preset.filters.count == 1, "Channel: \(selection) keeps the filter")
+            expect(result.skippedLines.isEmpty, "Channel: \(selection) is understood, not skipped")
+        } catch {
+            expect(false, "Channel: \(selection) covers both channels, threw \(error)")
+        }
+    }
+    expectImportRefused(
+        "Channel: L\n\(filter)\nChannel: R\n\(filter)", line: 1, mentioning: "both channels",
+        "per-ear sections"
+    )
+    expectImportRefused(
+        "\(filter)\nChannel: SUB\n\(filter)", line: 2, mentioning: "both channels",
+        "channel with neither L nor R"
+    )
+}
+
+/// Commands whose absence would change the sound are refused, not dropped.
+func testAPORefusesUnsupportedCommands() {
+    let filter = "Filter 1: ON PK Fc 100 Hz Gain 3 dB Q 1"
+    expectImportRefused(
+        "\(filter)\nGraphicEQ: 20 -3.4; 21 -3.2; 22 -3.0", line: 2, mentioning: "ParametricEQ.txt",
+        "GraphicEQ points to the parametric export"
+    )
+    for command in [
+        "Delay: 10 ms", "Copy: L=R", "Include: other.txt", "Convolution: room.wav",
+        "Eval: x = 1", "If: x == 1", "ElseIf: x == 2", "Else:", "EndIf:",
+        "LoudnessCorrection: State 1", "VSTPlugin: Library plugin.dll",
+    ] {
+        let name = String(command.prefix(while: { $0 != ":" }))
+        expectImportRefused("\(filter)\n\(command)", line: 2, mentioning: name, name)
+    }
+}
+
+/// Device and Stage don't change the sound on a Mac; they're skipped and reported.
+func testAPOSkipsDeviceAndStage() {
+    do {
+        let result = try parseAPOConfig(
+            "Device: Speakers\nStage: post-mix\nFilter 1: ON PK Fc 100 Hz Gain 3 dB Q 1"
+        )
+        expect(result.preset.filters.count == 1, "the filter still imports")
+        expect(result.skippedLines.map(\.line) == [1, 2], "Device and Stage reported, got \(result.skippedLines)")
+    } catch {
+        expect(false, "Device/Stage should not block the import, threw \(error)")
+    }
+}
+
+func testDescribeSkippedLines() {
+    expect(describeSkippedLines([]) == nil, "nothing skipped, nothing to say")
+    expect(
+        describeSkippedLines([APOSkippedLine(line: 4, text: "Device: Speakers")])
+            == "Skipped 1 line MacEQ doesn't use: line 4 “Device: Speakers”.",
+        "one line, got \(String(describing: describeSkippedLines([APOSkippedLine(line: 4, text: "Device: Speakers")])))"
+    )
+    let many = [1, 3, 4, 6, 8, 9].map { APOSkippedLine(line: $0, text: "h\($0)") }
+    expect(
+        describeSkippedLines(many)
+            == "Skipped 6 lines MacEQ doesn't use: line 1 “h1”, line 3 “h3”, line 4 “h4”, and 3 more.",
+        "many lines are summarized, got \(String(describing: describeSkippedLines(many)))"
+    )
+}
+
+testAPOImportFromREW()
+testAPOChannelScoping()
+testAPORefusesUnsupportedCommands()
+testAPOSkipsDeviceAndStage()
+testDescribeSkippedLines()
 testFilterValidation()
 testValidatedFiltersHaveFiniteCoefficients()
 testAPOParseRejectsInvalidValues()
