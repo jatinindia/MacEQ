@@ -130,10 +130,9 @@ final class EQController: ObservableObject {
         didSet {
             guard !isApplyingProfile else { return }
             defaults.set(bufferFrames, forKey: "bufferFrames")
-            if isRunning {
-                stop()
-                start()
-            }
+            // Not gated on isRunning: if the old size was the reason the
+            // engine failed to start, picking another must retry right away.
+            restartEngine()
         }
     }
     @Published var launchAtLogin: Bool {
@@ -263,8 +262,7 @@ final class EQController: ObservableObject {
 
     private func restartForExclusionChange() {
         guard isRunning else { return }
-        stop()
-        start()
+        restartEngine()
     }
 
     private var lastExcludedPIDs: [pid_t] = []
@@ -287,7 +285,41 @@ final class EQController: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
+    // MARK: - Engine lifecycle
+
+    /// What the user asked for (launch, Start/Stop in the menu), as opposed to
+    /// `isRunning`, which is what the engine currently manages. The two differ
+    /// while a failed start waits to be retried: every automatic restart path
+    /// (device change, rate change, watchdog, retry) acts on this intent, so a
+    /// single failure can no longer leave the EQ stopped for good.
+    private var wantsRunning = false
+    private var consecutiveStartFailures = 0
+    private var engineRetry: DispatchWorkItem?
+
     func start() {
+        wantsRunning = true
+        consecutiveStartFailures = 0
+        startEngine()
+    }
+
+    func stop() {
+        wantsRunning = false
+        engineRetry?.cancel()
+        engineRetry = nil
+        stopEngine()
+    }
+
+    /// Rebuilds the audio path for a configuration change, if the user wants
+    /// the engine running. Also recovers an engine that is waiting on a retry.
+    private func restartEngine() {
+        guard wantsRunning else { return }
+        stopEngine()
+        startEngine()
+    }
+
+    private func startEngine() {
+        engineRetry?.cancel()
+        engineRetry = nil
         errorMessage = nil
         do {
             let excluded = resolveExcludedAudioProcesses()
@@ -296,18 +328,32 @@ final class EQController: ObservableObject {
             engine.preferredBufferFrames = UInt32(max(bufferFrames, 0))
             try engine.start()
             isRunning = true
+            consecutiveStartFailures = 0
             loadProfileForCurrentDevice()
             rebuildKernel()
             rebuildConvolver()
             startPolling()
         } catch {
-            errorMessage = String(describing: error)
             engine.stop()
             isRunning = false
+            consecutiveStartFailures += 1
+            let delay = engineRestartDelay(afterConsecutiveFailures: consecutiveStartFailures)
+            errorMessage = "\(String(describing: error)) — retrying in \(Int(delay)) s"
+            scheduleEngineRetry(after: delay)
         }
     }
 
-    func stop() {
+    private func scheduleEngineRetry(after delay: TimeInterval) {
+        engineRetry?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.wantsRunning, !self.isRunning else { return }
+            self.startEngine()
+        }
+        engineRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func stopEngine() {
         watchdogTimer?.invalidate()
         watchdogTimer = nil
         statusTimer?.invalidate()
@@ -724,11 +770,11 @@ final class EQController: ObservableObject {
     }
 
     /// Tears down and rebuilds the audio path on the new default output device
-    /// (also used for sample-rate renegotiation on the same device).
+    /// (also used for sample-rate renegotiation on the same device). Runs even
+    /// while a failed start awaits its retry: a new device is the most likely
+    /// moment for the path to come back.
     private func handleDeviceChange() {
-        guard isRunning else { return }
-        stop()
-        start()
+        restartEngine()
     }
 
     // MARK: - Global hotkey
@@ -795,8 +841,24 @@ final class EQController: ObservableObject {
         guard otherAudioProcessIsPlaying() else { return }
         watchdogRestartCount += 1
         lastWatchdogRestart = Date()
-        stop()
-        start()
+        restartEngine()
+    }
+
+    /// Callback-stall watchdog state, reset on every successful start.
+    private var lastSeenCallbackCount: UInt64?
+    private var stalledWatchdogTicks = 0
+
+    /// Records one watchdog observation of the IOProc callback counter and
+    /// returns true once callbacks have stopped for
+    /// `callbackStallTicksBeforeRestart` ticks in a row (see nextStalledTickCount).
+    private func callbackStallDetected(stats: IOStats) -> Bool {
+        stalledWatchdogTicks = nextStalledTickCount(
+            previousCallbackCount: lastSeenCallbackCount,
+            currentCallbackCount: stats.callbackCount,
+            stalledTicks: stalledWatchdogTicks
+        )
+        lastSeenCallbackCount = stats.callbackCount
+        return stalledWatchdogTicks >= callbackStallTicksBeforeRestart
     }
 
     /// True when any audio process other than ourselves and the excluded apps has
@@ -868,10 +930,19 @@ final class EQController: ObservableObject {
     }
 
     private func startPolling() {
+        lastSeenCallbackCount = nil
+        stalledWatchdogTicks = 0
         watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 guard let status = self.engine.status else { return }
+                // A dead path first: with no callbacks at all, the zero-buffer
+                // check below has nothing to count and would never fire.
+                if self.callbackStallDetected(stats: self.engine.stats) {
+                    self.watchdogRestartCount += 1
+                    self.restartEngine()
+                    return
+                }
                 self.checkZeroBufferWatchdog(status: status, stats: self.engine.stats)
             }
         }

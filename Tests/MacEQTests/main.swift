@@ -1100,8 +1100,41 @@ func testSpectrumAnalyzerAtLowSampleRates() {
     }
 }
 
+// MARK: - Engine recovery
+
+func testEngineRestartDelayBacksOff() {
+    let delays = (1...8).map { engineRestartDelay(afterConsecutiveFailures: $0) }
+    expect(delays == [1, 2, 4, 8, 16, 30, 30, 30], "retry delays double from 1 s and cap at 30 s, got \(delays)")
+    expect(
+        engineRestartDelay(afterConsecutiveFailures: 10_000) == 30,
+        "a device that stays broken for hours is still retried every 30 s"
+    )
+}
+
+func testCallbackStallCounting() {
+    expect(
+        nextStalledTickCount(previousCallbackCount: nil, currentCallbackCount: 100, stalledTicks: 3) == 0,
+        "no baseline yet (fresh start) is never a stall"
+    )
+    expect(
+        nextStalledTickCount(previousCallbackCount: 100, currentCallbackCount: 100, stalledTicks: 0) == 1,
+        "an unchanged callback count extends the streak"
+    )
+    expect(
+        nextStalledTickCount(previousCallbackCount: 100, currentCallbackCount: 100, stalledTicks: 1) == 2,
+        "the streak keeps growing while callbacks stay stopped"
+    )
+    expect(
+        nextStalledTickCount(previousCallbackCount: 100, currentCallbackCount: 150, stalledTicks: 2) == 0,
+        "any callback progress clears the streak"
+    )
+    expect(callbackStallTicksBeforeRestart == 2, "a stall needs two watchdog ticks (~4 s) without callbacks")
+}
+
 testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
+testEngineRestartDelayBacksOff()
+testCallbackStallCounting()
 
 if failureCount > 0 {
     print("\(failureCount) of \(expectationCount) expectations FAILED")
