@@ -135,7 +135,7 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Load / Replace / Clear Impulse Response…** | Loads a WAV/AIFF impulse response for convolution. It's resampled to your device rate automatically. Max ~1M samples (about 22 s at 48 kHz). |
 | **Convolution (name)** | Toggles the loaded impulse response on/off. Stored per output device. |
 | **Presets ▸** | Your saved tunings. Click a name to apply it, **Save Current as Preset…** to add one (an existing name is replaced), **Delete Preset ▸** to remove one. Presets are global — a tuning saved on speakers can be applied on headphones. They capture the EQ tuning (bands, mode, parametric chain, preamp) but not the bypass switch or the impulse response, which stay per-device. |
-| **Import / Export Preset…** | Reads/writes Equalizer APO `config.txt` files. Import is how you load an AutoEQ `ParametricEQ.txt` from disk. |
+| **Import / Export Preset…** | Reads/writes Equalizer APO `config.txt` files. Import is how you load an AutoEQ `ParametricEQ.txt` from disk. Export writes the mode you're in: in Graphic mode, one peaking filter per band, with the preamp your settings call for. |
 | **Stop / Start Audio Engine** | Tears down or rebuilds the audio path. The fix to try first if audio ever misbehaves. |
 | **About MacEQ** | Version, author, project link. |
 | **Quit MacEQ** | Quits. Your audio returns to normal immediately. |

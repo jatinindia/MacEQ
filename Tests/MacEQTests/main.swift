@@ -1666,6 +1666,37 @@ func testDescribeSkippedLines() {
     )
 }
 
+// MARK: - Exporting the graphic EQ
+
+/// Export in graphic mode must describe the curve being heard: one peaking
+/// filter per band whose coefficients are exactly what the audio path runs,
+/// surviving a write/read round trip as a config file.
+func testGraphicEQPresetMatchesWhatIsHeard() {
+    let frequencies = [31.5, 125, 1000, 2500, 16000]
+    let gains = [6.0, 0, -3.5, 2.5, -12]
+    let preset = graphicEQPreset(frequencies: frequencies, gains: gains, q: 2.2, preampDB: -6.0)
+    expect(preset.filters.count == 5, "one filter per band, 0 dB bands included, got \(preset.filters.count)")
+    expectClose(preset.preampDB, -6.0, tolerance: 1e-12, "preamp carried")
+    for (index, filter) in preset.filters.enumerated() {
+        expect(filter.type == .peaking && filter.isEnabled, "band \(index) is an enabled peaking filter")
+        for sampleRate in [44100.0, 48000] {
+            expect(
+                coefficients(for: filter, sampleRate: sampleRate) == peakingCoefficients(
+                    sampleRate: sampleRate, frequency: frequencies[index], q: 2.2, gainDB: gains[index]
+                ),
+                "band \(index) at \(sampleRate) Hz matches the graphic EQ's own coefficients"
+            )
+        }
+    }
+    do {
+        let reloaded = try parseAPOConfig(serializeAPOConfig(preset)).preset
+        expect(reloaded == preset, "graphic preset survives a config.txt round trip, got \(reloaded)")
+    } catch {
+        expect(false, "exported graphic preset failed to parse: \(error)")
+    }
+}
+
+testGraphicEQPresetMatchesWhatIsHeard()
 testAPOImportFromREW()
 testAPOChannelScoping()
 testAPORefusesUnsupportedCommands()

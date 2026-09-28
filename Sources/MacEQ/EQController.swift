@@ -554,7 +554,30 @@ final class EQController: ObservableObject {
 
     /// The live APO config text for the editor tab.
     func currentConfigText() -> String {
-        serializeAPOConfig(EQPreset(preampDB: effectivePreampDB, filters: parametricFilters))
+        serializeAPOConfig(EQPreset(preampDB: settingsPreampDB(), filters: parametricFilters))
+    }
+
+    /// The preamp the current settings call for (Auto's value for the active
+    /// curve, or the manual one). Unlike effectivePreampDB, which reads 0 while
+    /// bypassed or stopped, this doesn't depend on engine state, so a preset
+    /// written out while bypassed still carries the preamp that keeps it from
+    /// clipping.
+    private func settingsPreampDB() -> Double {
+        guard autoPreampEnabled else { return manualPreampDB }
+        let cascade = activeCascade(sampleRate: currentSampleRate).map(\.coefficients)
+        return autoPreampDB(of: cascade, sampleRate: currentSampleRate)
+    }
+
+    /// The active mode's curve as an APO preset: what's being heard.
+    private func activeModePreset() -> EQPreset {
+        switch mode {
+        case .graphic:
+            return graphicEQPreset(
+                frequencies: bands.map(\.frequency), gains: gains, q: Self.bandQ, preampDB: settingsPreampDB()
+            )
+        case .parametric:
+            return EQPreset(preampDB: settingsPreampDB(), filters: parametricFilters)
+        }
     }
 
     /// Applies edited/pasted APO config text (also the AutoEQ import path).
@@ -597,7 +620,8 @@ final class EQController: ObservableObject {
         }
     }
 
-    /// Exports the current parametric chain as an APO config.txt file.
+    /// Exports the active mode's curve (graphic bands or the parametric chain)
+    /// as an APO config.txt file.
     func exportPresetToFile() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
@@ -605,7 +629,7 @@ final class EQController: ObservableObject {
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try currentConfigText().write(to: url, atomically: true, encoding: .utf8)
+            try serializeAPOConfig(activeModePreset()).write(to: url, atomically: true, encoding: .utf8)
         } catch {
             errorMessage = "Could not write \(url.lastPathComponent): \(error)"
         }

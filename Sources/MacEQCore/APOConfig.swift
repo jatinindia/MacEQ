@@ -246,6 +246,20 @@ private func value(after index: Int, in tokens: [String], line: Int) throws -> S
     return tokens[index + 1]
 }
 
+/// The graphic EQ as an APO preset: one peaking filter per band, the same
+/// filter the audio path runs for it. Bands at 0 dB are kept so the band
+/// layout survives the trip to another app and back.
+public func graphicEQPreset(frequencies: [Double], gains: [Double], q: Double, preampDB: Double) -> EQPreset {
+    precondition(
+        frequencies.count == gains.count,
+        "graphicEQPreset needs one gain per band, got \(frequencies.count) bands and \(gains.count) gains"
+    )
+    let filters = zip(frequencies, gains).map { frequency, gain in
+        FilterSpec(type: .peaking, isEnabled: true, frequency: frequency, gainDB: gain, q: q)
+    }
+    return EQPreset(preampDB: preampDB, filters: filters)
+}
+
 /// Serializes a preset back to APO config.txt text (AutoEQ-style formatting).
 public func serializeAPOConfig(_ preset: EQPreset) -> String {
     var lines = [String(format: "Preamp: %.1f dB", preset.preampDB)]
