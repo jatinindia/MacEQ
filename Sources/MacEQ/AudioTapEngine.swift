@@ -117,9 +117,29 @@ final class IOStats {
     var lastPeakBits: UInt32 = 0
     var lastRMSBits: UInt32 = 0
     var consecutiveZeroBuffers: UInt64 = 0
+    /// Callbacks whose buffer layout differed from the route planned at start.
+    var layoutMismatches: UInt64 = 0
 
     var lastPeak: Float { Float(bitPattern: lastPeakBits) }
     var lastRMS: Float { Float(bitPattern: lastRMSBits) }
+}
+
+/// Interleaved stereo working buffer for the audio thread. The whole chain
+/// (compensation, convolution, EQ, spectrum capture) runs here, so it always
+/// sees plain stereo no matter how the output device lays out its channels;
+/// the result is then scattered to the device's stereo pair.
+final class StereoScratch {
+    /// Callbacks longer than this are processed in chunks.
+    static let capacityFrames = 4096
+    let samples = UnsafeMutablePointer<Float>.allocate(capacity: StereoScratch.capacityFrames * 2)
+
+    init() {
+        samples.initialize(repeating: 0, count: Self.capacityFrames * 2)
+    }
+
+    deinit {
+        samples.deallocate()
+    }
 }
 
 /// Snapshot of the running audio path, for display and per-device profiles.
@@ -128,6 +148,8 @@ struct EngineStatus {
     let outputDeviceUID: String
     let sampleRate: Double
     let tapFormatDescription: String
+    /// Which input buffer is the tap and where L/R land, for diagnostics.
+    let routeDescription: String
     let bufferFrameSize: UInt32
     /// 1 for plain devices; the sub-device count for multi-output devices, where
     /// the tap attenuates the mix by that factor and the IOProc restores it.
@@ -148,6 +170,7 @@ final class AudioTapEngine {
     let kernelHolder = KernelHolder()
     let convolverHolder = ConvolverHolder()
     let captureRing = CaptureRing()
+    private let scratch = StereoScratch()
     private(set) var status: EngineStatus?
 
     /// Called on the main queue when the system default output device changes.
@@ -292,29 +315,68 @@ final class AudioTapEngine {
             let tapFormat = try tapStreamFormat(of: tapID)
             let bufferFrames = try bufferFrameSize(of: aggregateID)
 
-            // 3. Passthrough IOProc on the aggregate. Must stay real-time safe:
-            //    no allocation, no locks, no Objective-C/Swift runtime calls that lock.
+            // 3. Plan the routing from the layouts Core Audio reports. The input
+            //    list is the output device's own inputs (a headset mic, an
+            //    interface's inputs) followed by the tap, and the output side
+            //    can be any channel count or one buffer per channel. Copying
+            //    input buffer i to output buffer i, as this used to, played the
+            //    mic instead of the system mix on such devices, and scrambled
+            //    stereo into multichannel layouts.
+            guard tapFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+                  tapFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+            else {
+                throw CoreAudioError(
+                    call: "tap stream is not interleaved Float32 (\(describe(format: tapFormat)))",
+                    status: noErr
+                )
+            }
+            let outputChannels = try streamConfiguration(of: aggregateID, scope: kAudioObjectPropertyScopeOutput)
+            let route = try planTapRoute(
+                aggregateInputChannels: try streamConfiguration(of: aggregateID, scope: kAudioObjectPropertyScopeInput),
+                deviceInputChannels: try streamConfiguration(of: outputDevice, scope: kAudioObjectPropertyScopeInput),
+                tapChannelCount: Int(tapFormat.mChannelsPerFrame),
+                outputChannels: outputChannels,
+                preferredStereoChannels: try preferredStereoChannels(of: outputDevice)
+            )
+
+            // 4. The IOProc. Must stay real-time safe: no allocation, no locks,
+            //    no Objective-C/Swift runtime calls that lock.
             // The process tap attenuates the captured mix by the sub-device count
             // when the default output is a multi-output device; restore the level.
             let compensationGain = Float(outputSubDeviceCount(of: outputDevice))
+            let expectedInputBuffers = route.tapBufferIndex + 1
             let stats = self.stats
             let kernelHolder = self.kernelHolder
             let convolverHolder = self.convolverHolder
             let captureRing = self.captureRing
+            let scratch = self.scratch.samples
             try checkOSStatus(
                 AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, ioQueue) {
                     _, inInputData, _, outOutputData, _ in
                     disableDenormalsOnCurrentThread()
-                    passthrough(input: inInputData, output: outOutputData, stats: stats)
-                    if compensationGain != 1 {
-                        applyOutputGain(compensationGain, output: outOutputData)
+                    let outputBuffers = UnsafeMutableAudioBufferListPointer(outOutputData)
+                    clear(outputBuffers)
+                    let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+                    guard inputBuffers.count == expectedInputBuffers,
+                          inputBuffers[route.tapBufferIndex].mNumberChannels == 2,
+                          let tapData = inputBuffers[route.tapBufferIndex].mData
+                    else {
+                        // The layout changed since start() planned it. Play
+                        // silence rather than whatever sits in the wrong buffer;
+                        // counting it as a silent buffer lets the zero-buffer
+                        // watchdog rebuild (and replan) the path.
+                        stats.callbackCount &+= 1
+                        stats.layoutMismatches &+= 1
+                        stats.consecutiveZeroBuffers &+= 1
+                        return
                     }
-                    // Convolution before the EQ kernel so the kernel's limiter
-                    // stays last in the chain and still catches IR-induced overs.
-                    if let convolver = convolverHolder.convolver {
-                        applyConvolver(convolver, output: outOutputData)
-                    }
-                    if let kernel = kernelHolder.kernel {
+                    let tap = UnsafePointer(tapData.assumingMemoryBound(to: Float.self))
+                    let frameCount = Int(inputBuffers[route.tapBufferIndex].mDataByteSize)
+                        / (2 * MemoryLayout<Float>.size)
+                    recordTapStats(tap, frameCount: frameCount, stats: stats)
+
+                    let kernel = kernelHolder.kernel
+                    if let kernel {
                         if kernel !== kernelHolder.lastProcessedKernel {
                             if let previous = kernelHolder.lastProcessedKernel {
                                 kernel.adoptState(from: previous)
@@ -323,14 +385,30 @@ final class AudioTapEngine {
                             // controller's retire list still holds it.
                             kernelHolder.lastProcessedKernel = kernel
                         }
-                        applyKernel(kernel, output: outOutputData)
                     } else if kernelHolder.lastProcessedKernel != nil {
                         // Bypassed: that state goes stale, so the kernel after
                         // bypass starts fresh rather than from old history.
                         kernelHolder.lastProcessedKernel = nil
                     }
-                    if captureRing.captureEnabled {
-                        captureOutput(outOutputData, into: captureRing)
+                    let convolver = convolverHolder.convolver
+
+                    var offset = 0
+                    while offset < frameCount {
+                        let chunk = min(frameCount - offset, StereoScratch.capacityFrames)
+                        scratch.update(from: tap + offset * 2, count: chunk * 2)
+                        if compensationGain != 1 {
+                            var gain = compensationGain
+                            vDSP_vsmul(scratch, 1, &gain, scratch, 1, vDSP_Length(chunk * 2))
+                        }
+                        // Convolution before the EQ kernel so the kernel's limiter
+                        // stays last in the chain and still catches IR-induced overs.
+                        convolver?.process(interleaved: scratch, frameCount: chunk, channelCount: 2)
+                        kernel?.process(interleaved: scratch, frameCount: chunk, channelCount: 2)
+                        if captureRing.captureEnabled {
+                            captureRing.write(interleaved: scratch, frameCount: chunk, channelCount: 2)
+                        }
+                        scatterStereo(scratch, frameCount: chunk, atFrame: offset, to: route.output, in: outputBuffers)
+                        offset += chunk
                     }
                 },
                 "AudioDeviceCreateIOProcIDWithBlock"
@@ -346,6 +424,7 @@ final class AudioTapEngine {
                 outputDeviceUID: outputUID,
                 sampleRate: sampleRate,
                 tapFormatDescription: describe(format: tapFormat),
+                routeDescription: describe(route: route, outputChannels: outputChannels),
                 bufferFrameSize: bufferFrames,
                 tapCompensationGain: compensationGain
             )
@@ -473,87 +552,28 @@ final class AudioTapEngine {
     }
 }
 
-/// Feeds the first output buffer (as heard, post-EQ) into the spectrum ring.
-private func captureOutput(_ output: UnsafeMutablePointer<AudioBufferList>, into ring: CaptureRing) {
-    let buffers = UnsafeMutableAudioBufferListPointer(output)
-    guard let first = buffers.first, let data = first.mData else { return }
-    let channels = Int(max(first.mNumberChannels, 1))
-    let sampleCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-    ring.write(
-        interleaved: data.assumingMemoryBound(to: Float.self),
-        frameCount: sampleCount / channels,
-        channelCount: channels
-    )
-}
-
-/// Runs the FIR convolver in place on every output buffer. Real-time safe.
-private func applyConvolver(_ convolver: FIRConvolver, output: UnsafeMutablePointer<AudioBufferList>) {
-    let outputBuffers = UnsafeMutableAudioBufferListPointer(output)
-    for buffer in outputBuffers {
+/// Zeroes every output buffer, so channels the route doesn't write (everything
+/// but the stereo pair) are silent. Real-time safe.
+private func clear(_ buffers: UnsafeMutableAudioBufferListPointer) {
+    for buffer in buffers {
         guard let data = buffer.mData else { continue }
-        let channels = Int(max(buffer.mNumberChannels, 1))
-        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-        convolver.process(
-            interleaved: data.assumingMemoryBound(to: Float.self),
-            frameCount: sampleCount / channels,
-            channelCount: channels
-        )
+        memset(data, 0, Int(buffer.mDataByteSize))
     }
 }
 
-/// Runs the EQ kernel in place on every output buffer. Real-time safe.
-private func applyKernel(_ kernel: EQKernel, output: UnsafeMutablePointer<AudioBufferList>) {
-    let outputBuffers = UnsafeMutableAudioBufferListPointer(output)
-    for buffer in outputBuffers {
-        guard let data = buffer.mData else { continue }
-        let channels = Int(max(buffer.mNumberChannels, 1))
-        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-        kernel.process(
-            interleaved: data.assumingMemoryBound(to: Float.self),
-            frameCount: sampleCount / channels,
-            channelCount: channels
-        )
-    }
-}
-
-/// Copies tapped input buffers verbatim to the output buffers and updates stats.
-/// Runs on the real-time audio thread — free function, no captures beyond `stats`.
-private func passthrough(
-    input: UnsafePointer<AudioBufferList>,
-    output: UnsafeMutablePointer<AudioBufferList>,
-    stats: IOStats
-) {
-    let inputBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-    let outputBuffers = UnsafeMutableAudioBufferListPointer(output)
-
+/// Level stats from the tap alone, not every input buffer: on a device with
+/// inputs of its own, a microphone's noise floor would otherwise hide a silent
+/// tap from the zero-buffer watchdog. Real-time safe.
+private func recordTapStats(_ tap: UnsafePointer<Float>, frameCount: Int, stats: IOStats) {
+    let sampleCount = frameCount * 2
     var peak: Float = 0
     var sumOfSquares: Float = 0
-    var sampleCount = 0
-    var framesThisCallback: UInt64 = 0
-
-    for bufferIndex in 0..<min(inputBuffers.count, outputBuffers.count) {
-        let inBuffer = inputBuffers[bufferIndex]
-        let outBuffer = outputBuffers[bufferIndex]
-        guard let inData = inBuffer.mData, let outData = outBuffer.mData else { continue }
-
-        let byteCount = Int(min(inBuffer.mDataByteSize, outBuffer.mDataByteSize))
-        memcpy(outData, inData, byteCount)
-
-        let samples = inData.assumingMemoryBound(to: Float.self)
-        let count = byteCount / MemoryLayout<Float>.size
-        var bufferPeak: Float = 0
-        vDSP_maxmgv(samples, 1, &bufferPeak, vDSP_Length(count))
-        if bufferPeak > peak { peak = bufferPeak }
-        var bufferSumOfSquares: Float = 0
-        vDSP_svesq(samples, 1, &bufferSumOfSquares, vDSP_Length(count))
-        sumOfSquares += bufferSumOfSquares
-        sampleCount += count
-        let channels = max(inBuffer.mNumberChannels, 1)
-        framesThisCallback += UInt64(count) / UInt64(channels)
+    if sampleCount > 0 {
+        vDSP_maxmgv(tap, 1, &peak, vDSP_Length(sampleCount))
+        vDSP_svesq(tap, 1, &sumOfSquares, vDSP_Length(sampleCount))
     }
-
     stats.callbackCount &+= 1
-    stats.framesProcessed &+= framesThisCallback
+    stats.framesProcessed &+= UInt64(frameCount)
     stats.lastPeakBits = peak.bitPattern
     stats.lastRMSBits = (sampleCount > 0 ? (sumOfSquares / Float(sampleCount)).squareRoot() : 0).bitPattern
     if peak == 0 {
@@ -563,17 +583,21 @@ private func passthrough(
     }
 }
 
-/// Multiplies every output buffer by a constant gain in place. Real-time safe.
-/// Compensates the process tap's multi-output attenuation.
-private func applyOutputGain(_ gain: Float, output: UnsafeMutablePointer<AudioBufferList>) {
-    var gainValue = gain
-    let outputBuffers = UnsafeMutableAudioBufferListPointer(output)
-    for buffer in outputBuffers {
-        guard let data = buffer.mData else { continue }
-        let samples = data.assumingMemoryBound(to: Float.self)
-        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-        vDSP_vsmul(samples, 1, &gainValue, samples, 1, vDSP_Length(sampleCount))
+/// e.g. "tap = input buffer 2 of 2 · L → ch 3, R → ch 4 of 4".
+private func describe(route: TapRoute, outputChannels: [Int]) -> String {
+    let totalChannels = outputChannels.reduce(0, +)
+    // 1-based channel number across all output buffers.
+    func channelNumber(_ location: ChannelLocation) -> Int {
+        outputChannels.prefix(location.buffer).reduce(0, +) + location.channel + 1
     }
+    let output: String
+    switch route.output {
+    case .stereo(let left, let right):
+        output = "L → ch \(channelNumber(left)), R → ch \(channelNumber(right)) of \(totalChannels)"
+    case .mono(let location):
+        output = "mono downmix → ch \(channelNumber(location)) of \(totalChannels)"
+    }
+    return "tap = input buffer \(route.tapBufferIndex + 1) of \(route.tapBufferIndex + 1) · \(output)"
 }
 
 /// Current IO buffer size in frames, which dominates round-trip latency.

@@ -1263,6 +1263,202 @@ func testKernelSwapRampsPreampChange() {
     expect(after.allSatisfy { abs($0 - 0.25) < 1e-4 }, "after the ramp the new gain holds steady")
 }
 
+// MARK: - Tap routing (which input buffer is the tap, where L/R go)
+
+func expectRouteThrows(_ label: String, _ plan: () throws -> TapRoute) {
+    do {
+        let route = try plan()
+        expect(false, "\(label): expected an error, got \(route)")
+    } catch is TapRouteError {
+        // expected
+    } catch {
+        expect(false, "\(label): expected TapRouteError, got \(error)")
+    }
+}
+
+func testTapRoutePlanning() {
+    do {
+        // Built-in speakers / AirPods: no inputs of their own, one stereo stream.
+        let speakers = try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [], tapChannelCount: 2,
+            outputChannels: [2], preferredStereoChannels: (1, 2)
+        )
+        expect(speakers == TapRoute(
+            tapBufferIndex: 0,
+            output: .stereo(
+                left: ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 2),
+                right: ChannelLocation(buffer: 0, channel: 1, channelsInBuffer: 2)
+            )
+        ), "speakers: tap is buffer 0, L/R are channels 1-2, got \(speakers)")
+
+        // USB headset: the device's own mic stream comes first; the tap follows it.
+        let headset = try planTapRoute(
+            aggregateInputChannels: [1, 2], deviceInputChannels: [1], tapChannelCount: 2,
+            outputChannels: [2], preferredStereoChannels: (1, 2)
+        )
+        expect(headset.tapBufferIndex == 1, "headset: tap comes after the mic stream, got \(headset.tapBufferIndex)")
+
+        // 4-out interface, speakers set to channels 3-4 in Audio MIDI Setup.
+        let interface = try planTapRoute(
+            aggregateInputChannels: [4, 2], deviceInputChannels: [4], tapChannelCount: 2,
+            outputChannels: [4], preferredStereoChannels: (3, 4)
+        )
+        expect(interface == TapRoute(
+            tapBufferIndex: 1,
+            output: .stereo(
+                left: ChannelLocation(buffer: 0, channel: 2, channelsInBuffer: 4),
+                right: ChannelLocation(buffer: 0, channel: 3, channelsInBuffer: 4)
+            )
+        ), "interface: L/R land on the preferred channels 3-4, got \(interface)")
+
+        // One buffer per channel (non-interleaved device).
+        let perChannel = try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [], tapChannelCount: 2,
+            outputChannels: [1, 1, 1, 1], preferredStereoChannels: (1, 2)
+        )
+        expect(perChannel.output == .stereo(
+            left: ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 1),
+            right: ChannelLocation(buffer: 1, channel: 0, channelsInBuffer: 1)
+        ), "per-channel buffers: L/R are buffers 0 and 1, got \(perChannel.output)")
+
+        let mono = try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [], tapChannelCount: 2,
+            outputChannels: [1], preferredStereoChannels: (1, 2)
+        )
+        expect(
+            mono.output == .mono(ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 1)),
+            "a single-channel output gets a mono downmix, got \(mono.output)"
+        )
+
+        let unset = try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [], tapChannelCount: 2,
+            outputChannels: [4], preferredStereoChannels: (7, 8)
+        )
+        expect(unset.output == .stereo(
+            left: ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 4),
+            right: ChannelLocation(buffer: 0, channel: 1, channelsInBuffer: 4)
+        ), "preferred channels beyond the device fall back to 1-2, got \(unset.output)")
+    } catch {
+        expect(false, "route planning threw: \(error)")
+    }
+
+    expectRouteThrows("input buffers don't add up to device inputs + tap") {
+        try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [2], tapChannelCount: 2,
+            outputChannels: [2], preferredStereoChannels: (1, 2)
+        )
+    }
+    expectRouteThrows("tap buffer has the wrong channel count") {
+        try planTapRoute(
+            aggregateInputChannels: [1, 1], deviceInputChannels: [1], tapChannelCount: 2,
+            outputChannels: [2], preferredStereoChannels: (1, 2)
+        )
+    }
+    expectRouteThrows("device inputs don't match the aggregate's leading buffers") {
+        try planTapRoute(
+            aggregateInputChannels: [1, 2], deviceInputChannels: [2], tapChannelCount: 2,
+            outputChannels: [2], preferredStereoChannels: (1, 2)
+        )
+    }
+    expectRouteThrows("no output channels") {
+        try planTapRoute(
+            aggregateInputChannels: [2], deviceInputChannels: [], tapChannelCount: 2,
+            outputChannels: [], preferredStereoChannels: (1, 2)
+        )
+    }
+}
+
+/// An AudioBufferList with the given channels per buffer, zero-filled.
+func makeBufferList(channelsPerBuffer: [Int], frameCount: Int) -> UnsafeMutableAudioBufferListPointer {
+    let list = AudioBufferList.allocate(maximumBuffers: channelsPerBuffer.count)
+    for (index, channels) in channelsPerBuffer.enumerated() {
+        let samples = UnsafeMutablePointer<Float>.allocate(capacity: channels * frameCount)
+        samples.initialize(repeating: 0, count: channels * frameCount)
+        list[index] = AudioBuffer(
+            mNumberChannels: UInt32(channels),
+            mDataByteSize: UInt32(channels * frameCount * MemoryLayout<Float>.size),
+            mData: samples
+        )
+    }
+    return list
+}
+
+func freeBufferList(_ list: UnsafeMutableAudioBufferListPointer) {
+    for buffer in list {
+        buffer.mData?.deallocate()
+    }
+    free(list.unsafeMutablePointer)
+}
+
+func bufferSamples(_ list: UnsafeMutableAudioBufferListPointer, _ index: Int) -> [Float] {
+    let buffer = list[index]
+    let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+    return Array(UnsafeBufferPointer(start: buffer.mData!.assumingMemoryBound(to: Float.self), count: count))
+}
+
+func testStereoScatter() {
+    // Interleaved stereo source: L = 1 2 3 4, R = 10 20 30 40.
+    let stereo: [Float] = [1, 10, 2, 20, 3, 30, 4, 40]
+
+    // 4-channel interleaved device, L/R on channels 3-4; 1-2 must stay silent.
+    let interleaved = makeBufferList(channelsPerBuffer: [4], frameCount: 4)
+    scatterStereo(
+        stereo, frameCount: 4, atFrame: 0,
+        to: .stereo(
+            left: ChannelLocation(buffer: 0, channel: 2, channelsInBuffer: 4),
+            right: ChannelLocation(buffer: 0, channel: 3, channelsInBuffer: 4)
+        ),
+        in: interleaved
+    )
+    expect(
+        bufferSamples(interleaved, 0) == [0, 0, 1, 10, 0, 0, 2, 20, 0, 0, 3, 30, 0, 0, 4, 40],
+        "L/R written to channels 3-4 only, got \(bufferSamples(interleaved, 0))"
+    )
+    freeBufferList(interleaved)
+
+    // One buffer per channel, written in two chunks (the IOProc processes in
+    // scratch-sized chunks, so atFrame must offset correctly).
+    let perChannel = makeBufferList(channelsPerBuffer: [1, 1, 1], frameCount: 4)
+    let route = TapOutput.stereo(
+        left: ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 1),
+        right: ChannelLocation(buffer: 1, channel: 0, channelsInBuffer: 1)
+    )
+    scatterStereo(Array(stereo[0..<4]), frameCount: 2, atFrame: 0, to: route, in: perChannel)
+    scatterStereo(Array(stereo[4..<8]), frameCount: 2, atFrame: 2, to: route, in: perChannel)
+    expect(bufferSamples(perChannel, 0) == [1, 2, 3, 4], "left buffer, got \(bufferSamples(perChannel, 0))")
+    expect(bufferSamples(perChannel, 1) == [10, 20, 30, 40], "right buffer, got \(bufferSamples(perChannel, 1))")
+    expect(bufferSamples(perChannel, 2) == [0, 0, 0, 0], "unused channel stays silent")
+    freeBufferList(perChannel)
+
+    // Mono: averaged, so correlated material doesn't gain 6 dB.
+    let mono = makeBufferList(channelsPerBuffer: [1], frameCount: 4)
+    scatterStereo(
+        stereo, frameCount: 4, atFrame: 0,
+        to: .mono(ChannelLocation(buffer: 0, channel: 0, channelsInBuffer: 1)),
+        in: mono
+    )
+    expect(bufferSamples(mono, 0) == [5.5, 11, 16.5, 22], "mono is (L+R)/2, got \(bufferSamples(mono, 0))")
+    freeBufferList(mono)
+
+    // A buffer laid out differently than planned (device reconfigured) must
+    // not be written at the planned stride: silence, not scrambled audio. Eight
+    // stereo frames hold as many samples as four 4-channel frames, so only the
+    // channel-count check (not the size check) can catch this.
+    let changed = makeBufferList(channelsPerBuffer: [2], frameCount: 8)
+    scatterStereo(
+        stereo, frameCount: 4, atFrame: 0,
+        to: .stereo(
+            left: ChannelLocation(buffer: 0, channel: 2, channelsInBuffer: 4),
+            right: ChannelLocation(buffer: 0, channel: 3, channelsInBuffer: 4)
+        ),
+        in: changed
+    )
+    expect(bufferSamples(changed, 0).allSatisfy { $0 == 0 }, "mismatched layout stays silent, got \(bufferSamples(changed, 0))")
+    freeBufferList(changed)
+}
+
+testTapRoutePlanning()
+testStereoScatter()
 testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
 testEngineRestartDelayBacksOff()

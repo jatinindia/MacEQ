@@ -170,6 +170,49 @@ func outputStreamCount(of deviceID: AudioObjectID) throws -> Int {
     return Int(size) / MemoryLayout<AudioStreamID>.size
 }
 
+/// Channels per buffer of a device's IOProc buffer list in one scope: exactly
+/// the layout its AudioBufferList will have. Empty when the device has no
+/// streams in that scope.
+func streamConfiguration(of deviceID: AudioObjectID, scope: AudioObjectPropertyScope) throws -> [Int] {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    try checkOSStatus(
+        AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size),
+        "AudioObjectGetPropertyDataSize(kAudioDevicePropertyStreamConfiguration, device \(deviceID), scope \(scope))"
+    )
+    let byteCount = max(Int(size), MemoryLayout<AudioBufferList>.size)
+    let raw = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { raw.deallocate() }
+    raw.initializeMemory(as: UInt8.self, repeating: 0, count: byteCount)
+    try checkOSStatus(
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, raw),
+        "AudioObjectGetPropertyData(kAudioDevicePropertyStreamConfiguration, device \(deviceID), scope \(scope))"
+    )
+    let list = UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self))
+    return list.map { Int($0.mNumberChannels) }
+}
+
+/// The output channels (1-based) the device plays stereo on, as set in Audio
+/// MIDI Setup > Configure Speakers. macOS sends stereo here, so MacEQ does too.
+func preferredStereoChannels(of deviceID: AudioObjectID) throws -> (Int, Int) {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyPreferredChannelsForStereo,
+        mScope: kAudioObjectPropertyScopeOutput,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var channels: (UInt32, UInt32) = (0, 0)
+    var size = UInt32(MemoryLayout<(UInt32, UInt32)>.size)
+    try checkOSStatus(
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &channels),
+        "AudioObjectGetPropertyData(kAudioDevicePropertyPreferredChannelsForStereo, device \(deviceID))"
+    )
+    return (Int(channels.0), Int(channels.1))
+}
+
 /// Whether the device is running IO right now.
 func deviceIsRunning(_ deviceID: AudioObjectID) throws -> Bool {
     var address = propertyAddress(kAudioDevicePropertyDeviceIsRunning)

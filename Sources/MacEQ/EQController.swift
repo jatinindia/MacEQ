@@ -999,11 +999,15 @@ final class EQController: ObservableObject {
         )
         var lines = [
             "Tap format: \(status.tapFormatDescription)",
+            "Route: \(status.routeDescription)",
             String(format: "IO buffer: %u frames (~%.1f ms)", status.bufferFrameSize, Double(status.bufferFrameSize) / status.sampleRate * 1000),
             String(format: "Peak: %.1f dBFS", peakDB),
             "Callbacks: \(stats.callbackCount), silent streak: \(stats.consecutiveZeroBuffers)",
             "Watchdog restarts: \(watchdogRestartCount)",
         ]
+        if stats.layoutMismatches > 0 {
+            lines.append("Layout mismatches (silenced callbacks): \(stats.layoutMismatches)")
+        }
         if status.tapCompensationGain != 1 {
             lines.append(String(
                 format: "Multi-output compensation: x%.0f (+%.1f dB)",
