@@ -58,7 +58,10 @@ struct ParametricView: View {
             VStack(spacing: 4) {
                 ForEach(controller.parametricFilters.indices, id: \.self) { index in
                     BandRow(
-                        filter: $controller.parametricFilters[index],
+                        filter: Binding(
+                            get: { controller.parametricFilters[index] },
+                            set: { controller.updateParametricFilter(at: index, to: $0) }
+                        ),
                         color: BandPalette.color(index),
                         onDelete: { controller.removeParametricBand(at: index) }
                     )

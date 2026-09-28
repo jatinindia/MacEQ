@@ -51,6 +51,42 @@ public struct FilterSpec: Equatable {
     }
 }
 
+/// Why a filter's parameters can't make a stable biquad.
+public enum FilterSpecError: Error, Equatable, CustomStringConvertible {
+    case invalidFrequency(Double)
+    case invalidQ(Double)
+    case invalidGain(Double)
+
+    public var description: String {
+        switch self {
+        case .invalidFrequency(let frequency):
+            return "Fc must be a positive number of Hz, got \(frequency)"
+        case .invalidQ(let q):
+            return "Q must be a positive number, got \(q)"
+        case .invalidGain(let gain):
+            return "gain must be a finite number of dB, got \(gain)"
+        }
+    }
+}
+
+/// Refuses parameters the biquad formulas can't turn into a stable filter:
+/// Q = 0 divides by zero, a negative Q or Fc puts a pole outside the unit
+/// circle, and any non-finite value propagates straight into the audio as
+/// NaN. Every field is checked regardless of type, so switching a band's type
+/// later can't activate a bad stored value. (Fc at or above Nyquist is fine:
+/// coefficients(for:sampleRate:) makes that identity.)
+public func validateFilter(_ spec: FilterSpec) throws {
+    guard spec.frequency.isFinite, spec.frequency > 0 else {
+        throw FilterSpecError.invalidFrequency(spec.frequency)
+    }
+    guard spec.q.isFinite, spec.q > 0 else {
+        throw FilterSpecError.invalidQ(spec.q)
+    }
+    guard spec.gainDB.isFinite else {
+        throw FilterSpecError.invalidGain(spec.gainDB)
+    }
+}
+
 /// Fixed Q used by types without a user Q (LP, HP; and shelves at slope S=1,
 /// where the RBJ slope formula reduces to exactly 1/sqrt(2) for any gain).
 public let butterworthQ = 1.0 / 2.0.squareRoot()

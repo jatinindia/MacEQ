@@ -531,6 +531,19 @@ final class EQController: ObservableObject {
         )
     }
 
+    /// Replaces one parametric filter from a band-table edit. The number fields
+    /// accept any value, and Q 0 or a non-positive Fc would turn the audio into
+    /// NaN, so an invalid edit is refused and explained instead of applied.
+    func updateParametricFilter(at index: Int, to filter: FilterSpec) {
+        guard parametricFilters.indices.contains(index) else { return }
+        do {
+            try validateFilter(filter)
+            parametricFilters[index] = filter
+        } catch {
+            errorMessage = "Band \(index + 1) not changed: \(error)"
+        }
+    }
+
     func removeParametricBand(at index: Int) {
         guard parametricFilters.indices.contains(index) else { return }
         parametricFilters.remove(at: index)

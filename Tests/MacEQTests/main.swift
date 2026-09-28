@@ -1457,6 +1457,95 @@ func testStereoScatter() {
     freeBufferList(changed)
 }
 
+// MARK: - Invalid parametric values
+
+/// Q = 0 divides by zero and a negative Q or Fc puts a pole outside the unit
+/// circle: either way the audio turns to NaN. The band table and pasted
+/// config text can both produce these, so they are refused at the door.
+func testFilterValidation() {
+    func spec(frequency: Double, gainDB: Double, q: Double) -> FilterSpec {
+        FilterSpec(type: .peaking, isEnabled: true, frequency: frequency, gainDB: gainDB, q: q)
+    }
+    func expectInvalid(_ filter: FilterSpec, _ label: String) {
+        do {
+            try validateFilter(filter)
+            expect(false, "\(label) should be rejected")
+        } catch is FilterSpecError {
+            // expected
+        } catch {
+            expect(false, "\(label): expected FilterSpecError, got \(error)")
+        }
+    }
+    do {
+        try validateFilter(spec(frequency: 1000, gainDB: -4, q: 0.7))
+        try validateFilter(spec(frequency: 20, gainDB: 12, q: 0.1))
+        try validateFilter(spec(frequency: 16000, gainDB: 0, q: 20))
+    } catch {
+        expect(false, "valid filters rejected: \(error)")
+    }
+    expectInvalid(spec(frequency: 0, gainDB: 0, q: 1), "Fc 0")
+    expectInvalid(spec(frequency: -100, gainDB: 0, q: 1), "negative Fc")
+    expectInvalid(spec(frequency: .nan, gainDB: 0, q: 1), "NaN Fc")
+    expectInvalid(spec(frequency: .infinity, gainDB: 0, q: 1), "infinite Fc")
+    expectInvalid(spec(frequency: 1000, gainDB: 0, q: 0), "Q 0")
+    expectInvalid(spec(frequency: 1000, gainDB: 0, q: -1), "negative Q")
+    expectInvalid(spec(frequency: 1000, gainDB: 0, q: .nan), "NaN Q")
+    expectInvalid(spec(frequency: 1000, gainDB: 0, q: .infinity), "infinite Q")
+    expectInvalid(spec(frequency: 1000, gainDB: .nan, q: 1), "NaN gain")
+    expectInvalid(spec(frequency: 1000, gainDB: -.infinity, q: 1), "infinite gain")
+}
+
+/// The guarantee validation exists to give: anything it accepts produces
+/// finite coefficients, for every filter type, including extreme but legal
+/// values. (Fc at or above Nyquist is legal; it becomes identity.)
+func testValidatedFiltersHaveFiniteCoefficients() {
+    for type in FilterType.allCases {
+        for frequency in [0.5, 20, 1000, 23999, 30000] {
+            for q in [0.001, 0.7, 100] {
+                for gainDB in [-60.0, 0, 60] {
+                    let filter = FilterSpec(type: type, isEnabled: true, frequency: frequency, gainDB: gainDB, q: q)
+                    guard (try? validateFilter(filter)) != nil else {
+                        expect(false, "\(filter) should be valid")
+                        continue
+                    }
+                    let c = coefficients(for: filter, sampleRate: 48000)
+                    expect(
+                        [c.b0, c.b1, c.b2, c.a1, c.a2].allSatisfy(\.isFinite),
+                        "\(type.rawValue) Fc \(frequency) Q \(q) gain \(gainDB) gives finite coefficients, got \(c)"
+                    )
+                }
+            }
+        }
+    }
+}
+
+func testAPOParseRejectsInvalidValues() {
+    let cases: [(text: String, line: Int, label: String)] = [
+        ("Filter 1: ON PK Fc 0 Hz Gain 3 dB Q 1", 1, "Fc 0"),
+        ("Filter 1: ON PK Fc -50 Hz Gain 3 dB Q 1", 1, "negative Fc"),
+        ("Filter 1: ON PK Fc inf Hz Gain 3 dB Q 1", 1, "infinite Fc"),
+        ("Filter 1: ON PK Fc 100 Hz Gain 3 dB Q 0", 1, "Q 0"),
+        ("Filter 1: ON PK Fc 100 Hz Gain 3 dB Q -2", 1, "negative Q"),
+        ("Filter 1: ON PK Fc 100 Hz Gain nan dB Q 1", 1, "NaN gain"),
+        ("Filter 1: ON PK Fc 100 Hz Gain 3 dB BW Oct 0", 1, "zero bandwidth"),
+        ("Preamp: nan dB", 1, "NaN preamp"),
+        ("Preamp: -3 dB\nFilter 1: ON PK Fc 100 Hz Gain 3 dB Q 1\nFilter 2: ON PK Fc 200 Hz Gain 3 dB Q 0", 3, "bad filter on line 3"),
+    ]
+    for (text, line, label) in cases {
+        do {
+            let preset = try parseAPOConfig(text)
+            expect(false, "\(label): should be rejected, parsed \(preset)")
+        } catch let error as APOParseError {
+            expect(error.line == line, "\(label): error names line \(line), got \(error.line) (\(error))")
+        } catch {
+            expect(false, "\(label): expected APOParseError, got \(error)")
+        }
+    }
+}
+
+testFilterValidation()
+testValidatedFiltersHaveFiniteCoefficients()
+testAPOParseRejectsInvalidValues()
 testTapRoutePlanning()
 testStereoScatter()
 testFiltersAtOrAboveNyquistPassThroughStably()

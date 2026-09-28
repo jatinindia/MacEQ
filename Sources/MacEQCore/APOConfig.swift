@@ -54,8 +54,10 @@ public func parseAPOConfig(_ text: String) throws -> EQPreset {
     return EQPreset(preampDB: preampDB, filters: filters)
 }
 
+/// Parses one number. Double() also accepts "nan" and "inf", which would pass
+/// straight through to the audio as NaN, so only finite values count.
 private func parseNumber(_ token: String, line: Int, what: String) throws -> Double {
-    guard let value = Double(token.replacingOccurrences(of: ",", with: ".")) else {
+    guard let value = Double(token.replacingOccurrences(of: ",", with: ".")), value.isFinite else {
         throw APOParseError(line: line, message: "expected a number for \(what), got '\(token)'")
     }
     return value
@@ -114,7 +116,11 @@ private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpe
             guard valueIndex < tokens.count else {
                 throw APOParseError(line: line, message: "BW keyword without a value")
             }
-            bandwidthOctaves = try parseNumber(tokens[valueIndex], line: line, what: "bandwidth")
+            let octaves = try parseNumber(tokens[valueIndex], line: line, what: "bandwidth")
+            guard octaves > 0 else {
+                throw APOParseError(line: line, message: "bandwidth must be a positive number of octaves, got \(octaves)")
+            }
+            bandwidthOctaves = octaves
             index = valueIndex + 1
         default:
             index += 1
@@ -128,13 +134,19 @@ private func parseFilterLine(_ arguments: String, line: Int) throws -> FilterSpe
         // RBJ bandwidth-to-Q (midband approximation): 1/Q = 2·sinh(ln2/2 · N)
         q = 1.0 / (2.0 * sinh(log(2.0) / 2.0 * bandwidthOctaves))
     }
-    return FilterSpec(
+    let spec = FilterSpec(
         type: type,
         isEnabled: isEnabled,
         frequency: frequency,
         gainDB: gainDB,
         q: q ?? butterworthQ
     )
+    do {
+        try validateFilter(spec)
+    } catch let error as FilterSpecError {
+        throw APOParseError(line: line, message: error.description)
+    }
+    return spec
 }
 
 private func value(after index: Int, in tokens: [String], line: Int) throws -> String {
