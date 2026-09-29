@@ -60,10 +60,21 @@ struct EQPopoverView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             if let errorMessage = controller.errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
+                HStack(alignment: .top, spacing: 6) {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 0)
+                    Button {
+                        controller.dismissError()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Dismiss")
+                }
             }
             HStack(spacing: 8) {
                 Picker("", selection: $controller.mode) {
@@ -245,9 +256,19 @@ struct EQPopoverView: View {
             dbScale
             ForEach(controller.bands.indices, id: \.self) { index in
                 let band = controller.bands[index]
+                // Positional, like the parametric table: right after a band is
+                // removed SwiftUI can still read this row, so reads stay in
+                // bounds and writes to a vanished band are dropped.
+                let gain = controller.gains[index]
                 VStack(spacing: 6) {
                     VerticalSlider(
-                        value: $controller.gains[index],
+                        value: Binding(
+                            get: { controller.gains.indices.contains(index) ? controller.gains[index] : gain },
+                            set: { newGain in
+                                guard controller.gains.indices.contains(index) else { return }
+                                controller.gains[index] = newGain
+                            }
+                        ),
                         range: EQController.gainRange
                     )
                     .frame(height: 140)
@@ -282,6 +303,12 @@ struct EQPopoverView: View {
                     .disabled(controller.bands.count == 1)
                 }
             }
+        }
+        // The frequency editor remembers a position. Once bands are added,
+        // removed or re-sorted that position means a different band, and
+        // pressing Return would retune it, so the edit is dropped instead.
+        .onChange(of: controller.bands.map(\.frequency)) { _, _ in
+            cancelBandEdit()
         }
     }
 

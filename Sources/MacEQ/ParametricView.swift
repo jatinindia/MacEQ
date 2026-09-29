@@ -66,13 +66,27 @@ struct ParametricView: View {
         ScrollView {
             VStack(spacing: 4) {
                 ForEach(controller.parametricFilters.indices, id: \.self) { index in
+                    // Rows are keyed by position. Right after a deletion SwiftUI
+                    // can still read a row that no longer exists; the snapshot
+                    // keeps that read in bounds instead of crashing.
+                    let snapshot = controller.parametricFilters[index]
                     BandRow(
                         filter: Binding(
-                            get: { controller.parametricFilters[index] },
+                            get: {
+                                controller.parametricFilters.indices.contains(index)
+                                    ? controller.parametricFilters[index] : snapshot
+                            },
                             set: { controller.updateParametricFilter(at: index, to: $0) }
                         ),
                         color: BandPalette.color(index),
-                        onDelete: { controller.removeParametricBand(at: index) }
+                        onDelete: {
+                            // Commit any half-typed value now, while positions
+                            // still point at the right bands. Committed after the
+                            // deletion, it would land on whichever band moved
+                            // into that row.
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            controller.removeParametricBand(at: index)
+                        }
                     )
                 }
                 if controller.parametricFilters.isEmpty {

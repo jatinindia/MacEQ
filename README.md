@@ -129,7 +129,7 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Restore Default Bands** | Puts the graphic EQ back to the classic 10-band octave layout. Gains carry over for frequencies present in both layouts. |
 | **Safety Limiter** | Catches overshoots so a heavy boost distorts instead of blasting you. Recommended on. |
 | **Launch at Login** | Starts MacEQ automatically when you log in. |
-| **Change Hotkey…** | Records a new global shortcut. Must include ⌘, ⌥ or ⌃. Esc cancels. If the combo is taken by another app, MacEQ says so instead of silently failing. |
+| **Change Hotkey…** | Records a new global shortcut. Must include ⌘, ⌥ or ⌃. Esc cancels. If the combo is taken by another app, MacEQ says so and keeps your current shortcut. |
 | **Buffer Size** | Audio block size. Smaller = lower latency, more CPU, more risk of dropouts. Leave on Device Default unless you have a reason. |
 | **Excluded Apps…** | Pick apps that should bypass the EQ entirely. |
 | **Load / Replace / Clear Impulse Response…** | Loads a WAV/AIFF impulse response for convolution. It's resampled to your device rate automatically. Max ~1M samples (about 22 s at 48 kHz). |
@@ -288,7 +288,6 @@ XCTest needs full Xcode, so MacEQ ships its own.
 ## Roadmap
 
 - Developer ID signing + notarization, so macOS stops warning on first launch.
-- App icon.
 - Possibly automatic update checks — deliberately not done yet, since it would
   be the first network access in the app.
 

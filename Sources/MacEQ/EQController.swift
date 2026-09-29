@@ -373,6 +373,13 @@ final class EQController: ObservableObject {
         statusModel.diagnosticLines = []
     }
 
+    /// Clears the error line. Errors are otherwise only replaced or cleared by
+    /// the next engine start, so a fixed problem could linger indefinitely. A
+    /// failure that is still happening (e.g. the engine retry) reports again.
+    func dismissError() {
+        errorMessage = nil
+    }
+
     func resetAllBands() {
         gains = Array(repeating: 0.0, count: bands.count)
     }
@@ -849,31 +856,52 @@ final class EQController: ObservableObject {
     @Published private(set) var hotkeyDisplay: String = "⌥⌘E"
     private var hotkeyManager: HotkeyManager?
 
-    /// Registers the persisted (or default ⌥⌘E) global EQ-bypass hotkey.
-    func registerHotkey() {
-        hotkeyDisplay = defaults.string(forKey: "hotkeyDisplay") ?? "⌥⌘E"
-        let keyCode = UInt32(defaults.object(forKey: "hotkeyKeyCode") as? Int ?? kVK_ANSI_E)
-        let modifiers = UInt32(
-            defaults.object(forKey: "hotkeyModifiers") as? Int ?? (optionKey | cmdKey)
-        )
-        // Release the old registration first so re-binding the same combo works.
-        hotkeyManager = nil
-        hotkeyManager = HotkeyManager(keyCode: keyCode, modifiers: modifiers) { [weak self] in
+    private var storedHotkeyKeyCode: UInt32 {
+        UInt32(defaults.object(forKey: "hotkeyKeyCode") as? Int ?? kVK_ANSI_E)
+    }
+
+    private var storedHotkeyModifiers: UInt32 {
+        UInt32(defaults.object(forKey: "hotkeyModifiers") as? Int ?? (optionKey | cmdKey))
+    }
+
+    private func makeHotkeyManager(keyCode: UInt32, modifiers: UInt32) -> HotkeyManager? {
+        HotkeyManager(keyCode: keyCode, modifiers: modifiers) { [weak self] in
             DispatchQueue.main.async {
                 self?.eqEnabled.toggle()
             }
         }
+    }
+
+    /// Registers the persisted (or default ⌥⌘E) global EQ-bypass hotkey.
+    func registerHotkey() {
+        hotkeyDisplay = defaults.string(forKey: "hotkeyDisplay") ?? "⌥⌘E"
+        hotkeyManager = makeHotkeyManager(keyCode: storedHotkeyKeyCode, modifiers: storedHotkeyModifiers)
         if hotkeyManager == nil {
             errorMessage = "Could not register global hotkey \(hotkeyDisplay) — another app may already use it."
         }
     }
 
-    /// Persists and activates a new hotkey binding (from the recorder window).
+    /// Activates and persists a new hotkey binding (from the recorder window).
+    ///
+    /// The new combination is registered while the current one is still held,
+    /// and only saved once that works. Saving first (as this used to) meant a
+    /// combination another app owns replaced a working hotkey with none, on
+    /// every launch after.
     func setHotkey(keyCode: UInt32, modifiers: UInt32, display: String) {
+        let isCurrentBinding = keyCode == storedHotkeyKeyCode && modifiers == storedHotkeyModifiers
+        // Our own registration would make the same combination fail to
+        // register again; if it's already live there is nothing to change.
+        if isCurrentBinding, hotkeyManager != nil { return }
+        guard let manager = makeHotkeyManager(keyCode: keyCode, modifiers: modifiers) else {
+            let keeping = hotkeyManager != nil ? " Keeping \(hotkeyDisplay)." : ""
+            errorMessage = "Could not register \(display) — another app may already use it.\(keeping)"
+            return
+        }
+        hotkeyManager = manager
+        hotkeyDisplay = display
         defaults.set(Int(keyCode), forKey: "hotkeyKeyCode")
         defaults.set(Int(modifiers), forKey: "hotkeyModifiers")
         defaults.set(display, forKey: "hotkeyDisplay")
-        registerHotkey()
     }
 
     // MARK: - Zero-buffer watchdog
