@@ -13,18 +13,30 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$PROJECT_DIR/build/MacEQ.app"
 
 cd "$PROJECT_DIR"
-# Universal (Apple Silicon + Intel) binary. `swift build --arch a --arch b`
-# needs full Xcode's xcbuild; with Command Line Tools only, build each slice
-# via its triple and merge with lipo.
-swift build -c "$CONFIGURATION" --triple arm64-apple-macosx
-swift build -c "$CONFIGURATION" --triple x86_64-apple-macosx
+# Universal (Apple Silicon + Intel) binary: build each slice via its triple and
+# merge with lipo. This works with the Command Line Tools and with Xcode.
+#
+# Each slice gets its own scratch path, and its output location is asked of
+# SwiftPM rather than assumed. The paths are not stable: Xcode 27's SwiftPM
+# writes to .build/out/Products/<Config> for every triple, so a second slice
+# overwrites the first, and hard-coded .build/<triple>/<config> paths silently
+# picked up months-old binaries from an earlier toolchain instead.
+BINARIES=()
+for ARCH in arm64 x86_64; do
+    SCRATCH="$PROJECT_DIR/.build/app-$ARCH"
+    swift build -c "$CONFIGURATION" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH"
+    BINARY="$(swift build -c "$CONFIGURATION" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH" --show-bin-path)/MacEQ"
+    # Refuse a slice that isn't what it claims to be, rather than shipping it.
+    if [ "$(lipo -archs "$BINARY")" != "$ARCH" ]; then
+        echo "error: $BINARY is '$(lipo -archs "$BINARY")', expected '$ARCH'" >&2
+        exit 1
+    fi
+    BINARIES+=("$BINARY")
+done
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-lipo -create \
-    "$PROJECT_DIR/.build/arm64-apple-macosx/$CONFIGURATION/MacEQ" \
-    "$PROJECT_DIR/.build/x86_64-apple-macosx/$CONFIGURATION/MacEQ" \
-    -output "$APP_DIR/Contents/MacOS/MacEQ"
+lipo -create "${BINARIES[@]}" -output "$APP_DIR/Contents/MacOS/MacEQ"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
