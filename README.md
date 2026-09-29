@@ -87,8 +87,10 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 - **App exclude list** — leave chosen apps unequalized.
 - **Launch at login**, buffer-size control, live latency/CPU readout.
 - **Self-healing** — follows default-device changes, sample-rate changes and
-  Bluetooth renegotiation; a watchdog rebuilds the audio path if the system tap
-  goes silent.
+  Bluetooth renegotiation. If the audio path can't start (a Bluetooth device
+  still connecting, say), it retries on its own, and a watchdog rebuilds the
+  path if the system tap goes silent or audio stops flowing altogether, as can
+  happen after sleep.
 
 ## Every control, explained
 
@@ -104,8 +106,9 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Frequency labels** (graphic mode) | **Click the number under a slider** to retune that band. Press Return to apply, Escape to cancel. The band keeps its gain and moves into place if it passes a neighbour. |
 | **Preamp** | Overall level before the EQ. Boosting bands adds energy and can clip; the preamp pulls it back. |
 | **Auto** (next to Preamp) | Computes the preamp for you from the current band gains so nothing clips. Leave this on unless you want manual control — it disables the preamp slider while active. |
+| **Error line** (red, under the title) | Says what went wrong, e.g. a refused import or a failed hotkey. **Click ×** to dismiss it. A problem that's still happening, like the engine waiting to retry, reports again. |
 | **Status dot + line** | Green = engine running. Shows the output device, sample rate, round-trip latency, and CPU use. |
-| **Diagnostics** | Expandable technical detail: callback counts, silent-buffer streak, watchdog restarts, convolution taps, multi-output compensation. Useful when reporting a bug. |
+| **Diagnostics** | Expandable technical detail: callback counts, silent-buffer streak, watchdog restarts, the output route (which of the device's channels left and right play on), convolution taps, multi-output compensation. Useful when reporting a bug. |
 
 ### Parametric mode
 
@@ -116,9 +119,9 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Edit as text** | Swaps the band table for the raw Equalizer APO config. **This is where you paste an AutoEQ profile.** |
 | **Band table checkbox** | Enables/disables that one band without deleting it. |
 | **Type** | Filter type: `PK` peaking (the usual one), `LS`/`HS` low/high shelf, `LP`/`HP` low/high pass, `LSC`/`HSC` shelves with Q, `LPQ`/`HPQ` passes with Q, `NO` notch, `BP` band pass, `AP` all pass. |
-| **Fc** | Centre (or corner) frequency in Hz. |
+| **Fc** | Centre (or corner) frequency in Hz. Must be above 0; an invalid value is refused and the error line says why. |
 | **dB** | Gain. Greyed out for filter types that have no gain, like `LP` or `NO`. |
-| **Q** | Bandwidth — higher Q is narrower/more surgical. Greyed out for types that don't use it. |
+| **Q** | Bandwidth — higher Q is narrower/more surgical. Must be above 0. Greyed out for types that don't use it. |
 | **Trash** | Deletes that band. |
 
 ### The ⋯ menu
@@ -230,7 +233,9 @@ kept. Check your version in **⋯ → About MacEQ**.
 | Symptom | Fix |
 | --- | --- |
 | macOS won't open it at all, even via Open Anyway | Strip the download flag: `xattr -dr com.apple.quarantine /Applications/MacEQ.app`, then open it. |
-| No sound at all | ⋯ → **Stop Audio Engine**, then **Start Audio Engine**. |
+| No sound at all | MacEQ retries on its own when the audio path fails; the red error line says when it will try next. If it doesn't recover, ⋯ → **Stop Audio Engine**, then **Start Audio Engine**. |
+| Sound comes out of the wrong channels of an audio interface | MacEQ plays on the device's stereo pair, the same channels macOS uses. Set it in Audio MIDI Setup → select the device → **Configure Speakers**. Diagnostics shows the current route. |
+| An imported preset is refused | The error line names the line and why: usually per-ear filters, a GraphicEQ curve, or a value like Q 0. See [Importing presets](#importing-presets). |
 | No permission prompt appeared | System Settings → Privacy & Security → check MacEQ under audio recording. |
 | Permission prompt returns after every rebuild | Expected with ad-hoc signing. Reset with `tccutil reset SystemAudioCaptureRequests com.jatingrewal.maceq`. |
 | Distortion on heavy boosts | Turn on **Auto** preamp and **Safety Limiter**. |
@@ -272,9 +277,10 @@ carries its regeneration steps in the header.
 
 A **muted global process tap** captures and silences the system mix. A **private
 aggregate device** pairs that tap with the real output device. One **IOProc**
-then runs the chain — convolution → biquad cascade → preamp → limiter — and
-writes to the output. The limiter sits last so it catches overshoots from every
-stage before it.
+picks the tap's stereo stream out of the aggregate's inputs, runs the chain —
+convolution → biquad cascade → preamp → limiter — on it, and writes the result
+to the output device's stereo pair, leaving any other channels silent. The
+limiter sits last so it catches overshoots from every stage before it.
 
 Notable engineering details:
 
@@ -284,10 +290,21 @@ Notable engineering details:
   exactly one block of latency.
 - All audio-thread work is allocation-free; filter swaps hand ownership back to
   the main thread so the audio thread never releases memory.
+- Every setting change builds a new filter chain, and the new chain carries on
+  from the old one's filter state rather than starting from silence, so moving
+  a slider doesn't click.
+- The buffer layout is planned from Core Audio's own description before audio
+  starts: a device with inputs of its own (a USB headset's mic) lists them
+  ahead of the tap, and outputs can have any channel count. A layout that
+  doesn't fit the plan is refused rather than guessed at.
+- Filters at or above the Nyquist frequency pass audio through unchanged: at
+  the 16/24 kHz a Bluetooth headset drops to during calls, they would otherwise
+  be unstable.
 - Known platform quirks are handled rather than ignored: intermittent all-zero
-  tap buffers after long uptime (watchdog rebuilds the path), level attenuation
-  on multi-output devices (compensated in the IOProc), and sample-rate/Bluetooth
-  renegotiation (rate listener rebuilds the path).
+  tap buffers after long uptime (watchdog rebuilds the path), audio that stops
+  arriving at all, e.g. after sleep (a second watchdog rebuilds the path), level
+  attenuation on multi-output devices (compensated in the IOProc), and
+  sample-rate/Bluetooth renegotiation (rate listener rebuilds the path).
 
 Source layout: `Sources/MacEQCore` is the portable, tested DSP (filters, kernel,
 convolver, APO config parsing, spectrum). `Sources/MacEQ` is the macOS app
