@@ -9,7 +9,7 @@ Made by [Jatin Grewal](https://github.com/jatinindia). MIT licensed.
 
 [![Download MacEQ.dmg](https://img.shields.io/badge/Download-MacEQ.dmg-blue?style=for-the-badge&logo=apple)](https://github.com/jatinindia/MacEQ/releases/latest/download/MacEQ.dmg)
 
-**macOS 14.4 or later · Apple Silicon and Intel · 2.4 MB**
+**macOS 14.4 or later · Apple Silicon and Intel · 2.6 MB**
 
 That link always serves the newest version. Open the DMG, drag MacEQ into
 Applications, and see [Install](#install) — the first launch needs one extra
