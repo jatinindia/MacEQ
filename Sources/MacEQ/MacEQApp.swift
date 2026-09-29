@@ -5,8 +5,10 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let controller = EQController()
+    private var statusItemController: StatusItemController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItemController = StatusItemController(controller: Self.controller)
         Self.controller.start()
         Self.controller.registerHotkey()
         // After launch finishes: the one-time question is a modal alert, and
@@ -22,10 +24,12 @@ struct MacEQApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("MacEQ", systemImage: "slider.vertical.3") {
-            EQPopoverView(controller: AppDelegate.controller)
+        // Never shown: the real menu-bar item is StatusItemController's. SwiftUI
+        // opens the first scene at launch (even a Settings scene) unless it is
+        // a MenuBarExtra, and defaultLaunchBehavior(.suppressed) needs macOS 15.
+        MenuBarExtra("MacEQ", systemImage: "slider.vertical.3", isInserted: .constant(false)) {
+            EmptyView()
         }
-        .menuBarExtraStyle(.window)
 
         Window("Excluded Apps", id: "excluded-apps") {
             ExcludedAppsView(controller: AppDelegate.controller)
