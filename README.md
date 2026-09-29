@@ -241,8 +241,17 @@ kept. Check your version in **⋯ → About MacEQ**.
 
 ## Build from source
 
-Requires macOS 14.4+ and the Swift toolchain (Command Line Tools are enough —
-full Xcode is not needed).
+Requires macOS 14.4+ and a Swift toolchain. Which toolchain depends on your SDK:
+
+- **macOS 27 SDK: full Xcode.** This SDK implements SwiftUI's `@State` as a
+  compiler macro, and the plugin that expands it ships with Xcode, not with the
+  Command Line Tools. With the Command Line Tools alone the app fails to build
+  with `plugin for module 'SwiftUIMacros' not found`. After installing Xcode,
+  point the build tools at it (check with `xcode-select -p`):
+  `sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer`
+- **Earlier SDKs:** the Command Line Tools are enough.
+
+The test suite doesn't use SwiftUI, so it builds with either.
 
 ```sh
 git clone https://github.com/jatinindia/MacEQ.git
