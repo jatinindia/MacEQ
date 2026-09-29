@@ -305,6 +305,7 @@ final class EQController: ObservableObject {
     func start() {
         wantsRunning = true
         consecutiveStartFailures = 0
+        beginAudioActivity()
         startEngine()
     }
 
@@ -313,6 +314,29 @@ final class EQController: ObservableObject {
         engineRetry?.cancel()
         engineRetry = nil
         stopEngine()
+        endAudioActivity()
+    }
+
+    /// Held from Start until Stop, so macOS doesn't App Nap MacEQ while it is
+    /// meant to be processing audio. A running audio path already exempts the
+    /// process, but while the path is down (waiting on the system-audio
+    /// permission, or between rebuilds) the app looks idle; App Nap then
+    /// throttled the watchdog and retry timers, so recovery waited until the
+    /// user next clicked the menu. Idle system and display sleep stay allowed.
+    private var audioActivity: NSObjectProtocol?
+
+    private func beginAudioActivity() {
+        guard audioActivity == nil else { return }
+        audioActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Equalizing system audio"
+        )
+    }
+
+    private func endAudioActivity() {
+        guard let audioActivity else { return }
+        ProcessInfo.processInfo.endActivity(audioActivity)
+        self.audioActivity = nil
     }
 
     /// Rebuilds the audio path for a configuration change, if the user wants
@@ -1157,7 +1181,7 @@ final class EQController: ObservableObject {
     private func startPolling() {
         lastSeenCallbackCount = nil
         stalledWatchdogTicks = 0
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 guard let status = self.engine.status else { return }
@@ -1171,6 +1195,13 @@ final class EQController: ObservableObject {
                 self.checkZeroBufferWatchdog(status: status, stats: self.engine.stats)
             }
         }
+        // Common modes, not just the default one: a default-mode timer stops
+        // while any modal alert is open, and on first launch the system-audio
+        // permission prompt arrives together with the update question, so the
+        // path couldn't be rebuilt after the permission was granted until that
+        // question was answered too.
+        RunLoop.main.add(timer, forMode: .common)
+        watchdogTimer = timer
         updateStatusPolling()
     }
 
