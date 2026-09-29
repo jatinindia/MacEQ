@@ -1696,6 +1696,86 @@ func testGraphicEQPresetMatchesWhatIsHeard() {
     }
 }
 
+// MARK: - Update check
+
+func testReleaseVersionParsing() {
+    expect(parseReleaseVersion("v1.3.0") == ReleaseVersion(major: 1, minor: 3, patch: 0), "v-prefixed tag")
+    expect(parseReleaseVersion("1.3.0") == ReleaseVersion(major: 1, minor: 3, patch: 0), "bare version")
+    expect(parseReleaseVersion("v2.0.10") == ReleaseVersion(major: 2, minor: 0, patch: 10), "multi-digit patch")
+    for invalid in ["v1.3", "1.3.0-beta", "latest", "", "v1.3.0.1", "va.b.c", "v-1.0.0"] {
+        expect(parseReleaseVersion(invalid) == nil, "'\(invalid)' is not a release version")
+    }
+    expect(ReleaseVersion(major: 1, minor: 3, patch: 0).description == "1.3.0", "prints as 1.3.0")
+}
+
+func testReleaseVersionOrdering() {
+    func version(_ text: String) -> ReleaseVersion { parseReleaseVersion(text)! }
+    expect(version("1.3.0") < version("1.4.0"), "minor bump is newer")
+    expect(version("1.9.0") < version("1.10.0"), "numeric, not alphabetical: 1.10 is newer than 1.9")
+    expect(version("1.99.99") < version("2.0.0"), "major bump is newer")
+    expect(version("1.3.0") < version("1.3.1"), "patch bump is newer")
+    expect(!(version("1.3.0") < version("1.3.0")), "equal versions are not newer")
+}
+
+func testNewerRelease() {
+    do {
+        expect(
+            try newerRelease(latestTag: "v1.4.0", currentVersion: "1.3.0") == ReleaseVersion(major: 1, minor: 4, patch: 0),
+            "a newer release is offered"
+        )
+        expect(try newerRelease(latestTag: "v1.3.0", currentVersion: "1.3.0") == nil, "same version: up to date")
+        expect(try newerRelease(latestTag: "v1.2.0", currentVersion: "1.3.0") == nil, "never offers a downgrade")
+    } catch {
+        expect(false, "newerRelease threw: \(error)")
+    }
+    for (tag, current, label) in [("nightly", "1.3.0", "unparseable tag"), ("v1.4.0", "dev", "unparseable app version")] {
+        do {
+            let result = try newerRelease(latestTag: tag, currentVersion: current)
+            expect(false, "\(label) should throw, got \(String(describing: result))")
+        } catch is UpdateCheckError {
+            // expected
+        } catch {
+            expect(false, "\(label): expected UpdateCheckError, got \(error)")
+        }
+    }
+}
+
+func testDecodeLatestReleaseTag() {
+    // Trimmed from a real /releases/latest reply; unknown fields are ignored.
+    let reply = #"{"url":"https://api.github.com/repos/jatinindia/MacEQ/releases/1","tag_name":"v1.3.0","name":"MacEQ 1.3.0","draft":false,"prerelease":false,"assets":[]}"#
+    do {
+        expect(try decodeLatestReleaseTag(Data(reply.utf8)) == "v1.3.0", "tag read from the reply")
+    } catch {
+        expect(false, "valid reply rejected: \(error)")
+    }
+    for (bad, label) in [(#"{"name":"MacEQ"}"#, "no tag_name"), ("<html>rate limited</html>", "not JSON")] {
+        do {
+            let tag = try decodeLatestReleaseTag(Data(bad.utf8))
+            expect(false, "\(label) should throw, got \(tag)")
+        } catch is UpdateCheckError {
+            // expected
+        } catch {
+            expect(false, "\(label): expected UpdateCheckError, got \(error)")
+        }
+    }
+}
+
+func testUpdateCheckTiming() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    expect(isUpdateCheckDue(lastCheck: nil, now: now), "never checked: due")
+    expect(!isUpdateCheckDue(lastCheck: now.addingTimeInterval(-23 * 3600), now: now), "23 h ago: not due")
+    expect(isUpdateCheckDue(lastCheck: now.addingTimeInterval(-24 * 3600), now: now), "24 h ago: due")
+    expect(
+        isUpdateCheckDue(lastCheck: now.addingTimeInterval(3600), now: now),
+        "a last check in the future (clock set back) must not block checks until the clock catches up"
+    )
+}
+
+testReleaseVersionParsing()
+testReleaseVersionOrdering()
+testNewerRelease()
+testDecodeLatestReleaseTag()
+testUpdateCheckTiming()
 testGraphicEQPresetMatchesWhatIsHeard()
 testAPOImportFromREW()
 testAPOChannelScoping()

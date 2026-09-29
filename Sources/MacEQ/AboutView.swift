@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// About panel: version, author, project link, and the privacy claim the app
-/// has to live up to (no recording, no network — see README).
+/// has to live up to (no recording; no network beyond the optional update
+/// check — see README).
 struct AboutView: View {
     static let repositoryURL = URL(string: "https://github.com/jatinindia/MacEQ")!
 
@@ -41,7 +42,8 @@ struct AboutView: View {
             }
 
             Text("Audio is equalized on your Mac and played straight back out. "
-                 + "MacEQ never records it and has no network access.")
+                 + "MacEQ never records it or sends it anywhere. Its only network "
+                 + "request is the optional daily update check, which sends nothing about you.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

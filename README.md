@@ -140,6 +140,8 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Presets ▸** | Your saved tunings. Click a name to apply it, **Save Current as Preset…** to add one (an existing name is replaced), **Delete Preset ▸** to remove one. Presets are global — a tuning saved on speakers can be applied on headphones. They capture the EQ tuning (bands, mode, parametric chain, preamp) but not the bypass switch or the impulse response, which stay per-device. |
 | **Import / Export Preset…** | Reads/writes Equalizer APO `config.txt` files. Import is how you load an AutoEQ `ParametricEQ.txt` from disk. Export writes the mode you're in: in Graphic mode, one peaking filter per band, with the preamp your settings call for. |
 | **Stop / Start Audio Engine** | Tears down or rebuilds the audio path. The fix to try first if audio ever misbehaves. |
+| **Check for Updates Automatically** | Asks GitHub about once a day whether a newer MacEQ is out; if one is, the top of the panel says so, with a **Download** button. MacEQ asks once whether to turn this on. See [Privacy](#privacy-and-security). |
+| **Check for Updates Now** | Checks right away and tells you the result, whether or not automatic checks are on. |
 | **About MacEQ** | Version, author, project link. |
 | **Quit MacEQ** | Quits. Your audio returns to normal immediately. |
 
@@ -185,9 +187,14 @@ milliseconds it takes to process.
 
 **What MacEQ does not do:**
 
-- It has **no network code at all** — no telemetry, no analytics, no update
-  check, nothing. It cannot send your audio anywhere because it has no code that
-  can talk to a network.
+- It **never sends your audio anywhere**, and has no telemetry or analytics.
+  Its only network request is the **optional update check**, and it asks before
+  turning that on: about once a day it asks GitHub's public API which MacEQ
+  release is the latest. Nothing about you, your Mac or your audio is sent;
+  GitHub sees an ordinary web request from your IP address, like any website
+  would. It's one request in
+  [`UpdateChecker.swift`](Sources/MacEQ/UpdateChecker.swift), easy to audit,
+  and **⋯ → Check for Updates Automatically** turns it off.
 - It **never writes audio to disk**. There is no record function.
 - It does not read your keystrokes. The global hotkey uses the system's
   registration API, which only ever delivers the one combination you registered.
@@ -195,7 +202,8 @@ milliseconds it takes to process.
   settings.
 
 **What it stores on your Mac:** your EQ settings, presets, per-device profiles,
-excluded app IDs, and the path to your impulse response file — in MacEQ's own
+excluded app IDs, the path to your impulse response file, and your update-check
+choice with when it last checked and the latest version it saw — in MacEQ's own
 preferences, nowhere else.
 
 **The permission is genuinely powerful, though.** "Record system audio" means any
@@ -222,11 +230,17 @@ same caution applies to every unsigned app you download, this one included.
 
 ## Updating
 
-MacEQ does **not** update itself. New versions are published on the
+MacEQ doesn't install updates itself, but with update checks on it tells you
+when one is out: the top of its panel shows "MacEQ x.y.z is available" with a
+**Download** button. New versions are published on the
 [releases page](https://github.com/jatinindia/MacEQ/releases) — download the
 DMG, drag the new MacEQ onto Applications, and confirm the replacement. Quit
 MacEQ from the menu bar first if it is running. Your settings and presets are
 kept. Check your version in **⋯ → About MacEQ**.
+
+After an update macOS asks for the system-audio permission again: MacEQ is
+ad-hoc signed, and each build counts as a new app until it has a Developer ID
+signature.
 
 ## Troubleshooting
 
@@ -314,8 +328,8 @@ XCTest needs full Xcode, so MacEQ ships its own.
 ## Roadmap
 
 - Developer ID signing + notarization, so macOS stops warning on first launch.
-- Possibly automatic update checks — deliberately not done yet, since it would
-  be the first network access in the app.
+- Installing updates automatically (Sparkle), once the app has a Developer ID
+  signature so an update doesn't reset the audio permission.
 
 ## License
 

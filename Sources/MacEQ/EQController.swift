@@ -220,6 +220,9 @@ final class EQController: ObservableObject {
             namedPresets = presets
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
+        // false until the user answers the one-time question (see setUpUpdateChecks).
+        updateChecksEnabled = defaults.object(forKey: "updateChecksEnabled") as? Bool ?? false
+        availableUpdateVersion = Self.newerKnownRelease(defaults: defaults)
 
         engine.onDefaultOutputDeviceChanged = { [weak self] in
             self?.handleDeviceChange()
@@ -904,6 +907,134 @@ final class EQController: ObservableObject {
         defaults.set(display, forKey: "hotkeyDisplay")
     }
 
+    // MARK: - Update check
+
+    /// Whether MacEQ checks GitHub for a newer release about once a day. Off
+    /// until the user answers the one-time question: MacEQ made no network
+    /// requests at all before this existed, and existing users are asked
+    /// rather than opted in.
+    @Published var updateChecksEnabled: Bool {
+        didSet {
+            defaults.set(updateChecksEnabled, forKey: "updateChecksEnabled")
+            scheduleUpdateChecks()
+        }
+    }
+    /// A release newer than the running app, e.g. "1.4.0"; nil when current.
+    @Published private(set) var availableUpdateVersion: String?
+    /// Outcome of the last check, for Diagnostics. Automatic checks report
+    /// here rather than in the red error line: an offline laptop shouldn't nag.
+    private var updateCheckStatus: String?
+    private var updateTimer: Timer?
+
+    private var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    /// The last release tag seen, compared to the running version. Makes the
+    /// notice show at launch without a network request, and disappear by
+    /// itself once the user has updated.
+    private static func newerKnownRelease(defaults: UserDefaults) -> String? {
+        guard let tag = defaults.string(forKey: "latestReleaseTag"),
+              let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let newer = try? newerRelease(latestTag: tag, currentVersion: current)
+        else { return nil }
+        return newer.description
+    }
+
+    /// Called once at launch: asks the one-time question if it hasn't been
+    /// answered, then starts the schedule if checks are on.
+    func setUpUpdateChecks() {
+        if defaults.object(forKey: "updateChecksEnabled") == nil {
+            askAboutUpdateChecks()
+        } else {
+            scheduleUpdateChecks()
+        }
+    }
+
+    private func askAboutUpdateChecks() {
+        let alert = NSAlert()
+        alert.messageText = "Check for MacEQ updates automatically?"
+        alert.informativeText = "MacEQ can ask GitHub once a day whether a newer version is out, and "
+            + "tell you in its menu. Nothing about you or your audio is sent; GitHub sees an ordinary "
+            + "web request. You can change this at any time in the ⋯ menu."
+        alert.addButton(withTitle: "Check Automatically")
+        alert.addButton(withTitle: "Don't Check")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // Assigning persists the answer (even "no"), so this is asked once.
+        updateChecksEnabled = alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Hourly wake-ups that only reach GitHub once the day has passed: a
+    /// 24-hour timer would drift past a day whenever the Mac slept through it.
+    private func scheduleUpdateChecks() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+        guard updateChecksEnabled else { return }
+        checkForUpdatesIfDue()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkForUpdatesIfDue()
+            }
+        }
+    }
+
+    private func checkForUpdatesIfDue() {
+        let lastCheck = defaults.object(forKey: "lastUpdateCheck") as? Date
+        guard isUpdateCheckDue(lastCheck: lastCheck, now: Date()) else { return }
+        Task {
+            do {
+                try await fetchUpdate()
+            } catch {
+                updateCheckStatus = "failed \(Date().formatted(date: .omitted, time: .shortened)): \(error)"
+            }
+        }
+    }
+
+    /// The "Check for Updates Now" menu item: runs regardless of the setting
+    /// (it is an explicit request) and always reports the outcome.
+    func checkForUpdatesNow() {
+        Task {
+            let alert = NSAlert()
+            var offersDownload = false
+            do {
+                if let version = try await fetchUpdate() {
+                    offersDownload = true
+                    alert.messageText = "MacEQ \(version) is available"
+                    alert.informativeText = "You have \(appVersion ?? "an unknown version")."
+                    alert.addButton(withTitle: "Download")
+                    alert.addButton(withTitle: "Later")
+                } else {
+                    alert.messageText = "MacEQ is up to date"
+                    alert.informativeText = "\(appVersion ?? "This version") is the latest release."
+                }
+            } catch {
+                updateCheckStatus = "failed \(Date().formatted(date: .omitted, time: .shortened)): \(error)"
+                alert.messageText = "Couldn't check for updates"
+                alert.informativeText = String(describing: error)
+            }
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn, offersDownload {
+                NSWorkspace.shared.open(UpdateChecker.releasesPageURL)
+            }
+        }
+    }
+
+    /// One check against GitHub. Records the time and the latest tag, and
+    /// returns the newer version if there is one.
+    @discardableResult
+    private func fetchUpdate() async throws -> String? {
+        guard let appVersion else {
+            throw UpdateCheckError.unparseableVersion("(no CFBundleShortVersionString in the app bundle)")
+        }
+        defaults.set(Date(), forKey: "lastUpdateCheck")
+        let tag = try await UpdateChecker.fetchLatestReleaseTag(appVersion: appVersion)
+        let newer = try newerRelease(latestTag: tag, currentVersion: appVersion)
+        defaults.set(tag, forKey: "latestReleaseTag")
+        availableUpdateVersion = newer?.description
+        updateCheckStatus = "\(Date().formatted(date: .omitted, time: .shortened)), latest release \(tag)"
+        return newer?.description
+    }
+
     // MARK: - Zero-buffer watchdog
 
     /// The documented process-tap platform bug: after long uptime the tap starts
@@ -1076,6 +1207,9 @@ final class EQController: ObservableObject {
             "Callbacks: \(stats.callbackCount), silent streak: \(stats.consecutiveZeroBuffers)",
             "Watchdog restarts: \(watchdogRestartCount)",
         ]
+        if let updateCheckStatus {
+            lines.append("Update check: \(updateCheckStatus)")
+        }
         if stats.layoutMismatches > 0 {
             lines.append("Layout mismatches (silenced callbacks): \(stats.layoutMismatches)")
         }

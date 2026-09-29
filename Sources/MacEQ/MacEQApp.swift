@@ -9,6 +9,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.controller.start()
         Self.controller.registerHotkey()
+        // After launch finishes: the one-time question is a modal alert, and
+        // the engine should already be running behind it.
+        DispatchQueue.main.async {
+            Self.controller.setUpUpdateChecks()
+        }
     }
 }
 
@@ -59,6 +64,20 @@ struct EQPopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            if let version = controller.availableUpdateVersion {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.tint)
+                    Text("MacEQ \(version) is available")
+                        .font(.caption)
+                    Spacer(minLength: 0)
+                    Button("Download") {
+                        NSWorkspace.shared.open(UpdateChecker.releasesPageURL)
+                    }
+                    .controlSize(.small)
+                    .help("Open the MacEQ releases page on GitHub")
+                }
+            }
             if let errorMessage = controller.errorMessage {
                 HStack(alignment: .top, spacing: 6) {
                     Text(errorMessage)
@@ -192,6 +211,8 @@ struct EQPopoverView: View {
                     Button("Start Audio Engine") { controller.start() }
                 }
                 Divider()
+                Toggle("Check for Updates Automatically", isOn: $controller.updateChecksEnabled)
+                Button("Check for Updates Now") { controller.checkForUpdatesNow() }
                 Button("About MacEQ") {
                     openWindow(id: "about")
                     NSApplication.shared.activate(ignoringOtherApps: true)
