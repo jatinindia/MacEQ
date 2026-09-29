@@ -19,10 +19,12 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP="$PROJECT_DIR/build/MacEQ.app"
 VOLUME_NAME="MacEQ"
-STAGING="$PROJECT_DIR/build/dmg-staging"
 TEMP_DMG="$PROJECT_DIR/build/MacEQ-temp.dmg"
 FINAL_DMG="$PROJECT_DIR/build/MacEQ.dmg"
 MOUNT_POINT="/Volumes/$VOLUME_NAME"
+# LZMA: the smallest format diskutil offers (about 15% under the old
+# zlib-9 image). Opens on macOS 10.15+, well below MacEQ's own 14.4 floor.
+COMPRESSED_FORMAT="ULMO"
 
 if [ ! -d "$APP" ]; then
     echo "error: $APP not found — run scripts/build-app.sh first" >&2
@@ -31,27 +33,34 @@ fi
 
 # A stale mount from an interrupted run would silently poison the next build.
 if [ -d "$MOUNT_POINT" ]; then
-    hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true
+    diskutil eject force "$MOUNT_POINT" >/dev/null 2>&1 || true
 fi
 
-rm -rf "$STAGING" "$TEMP_DMG" "$FINAL_DMG"
-mkdir -p "$STAGING/.background"
-
-cp -R "$APP" "$STAGING/MacEQ.app"
-ln -s /Applications "$STAGING/Applications"
-cp "$PROJECT_DIR/Resources/dmg-background.tiff" "$STAGING/.background/background.tiff"
+rm -rf "$TEMP_DMG" "$FINAL_DMG"
 
 # Read-write image first: Finder has to be able to write the .DS_Store into it.
-hdiutil create \
-    -srcfolder "$STAGING" \
-    -volname "$VOLUME_NAME" \
-    -fs HFS+ \
-    -format UDRW \
-    -ov \
+# diskutil (which replaces the deprecated hdiutil verbs) only makes APFS
+# volumes; fine here, since MacEQ requires macOS 14.4 and APFS images open on
+# 10.13+. It has no create-from-folder in a writable format, so a blank RAW
+# image is sized from the content (plus room for Finder's .DS_Store and the
+# volume icon) and filled after attaching.
+CONTENT_KB=$(( $(du -sk "$APP" | cut -f1) + $(du -sk "$PROJECT_DIR/Resources/dmg-background.tiff" | cut -f1) \
+    + $(du -sk "$PROJECT_DIR/Resources/AppIcon.icns" | cut -f1) ))
+diskutil image create blank \
+    --format RAW \
+    --fs APFS \
+    --volumeName "$VOLUME_NAME" \
+    --size $(( (CONTENT_KB + 10240) * 1024 )) \
     "$TEMP_DMG" >/dev/null
 
-hdiutil attach "$TEMP_DMG" -readwrite -noverify -noautoopen >/dev/null
-trap 'hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true' EXIT
+diskutil image attach "$TEMP_DMG" >/dev/null
+trap 'diskutil eject force "$MOUNT_POINT" >/dev/null 2>&1 || true' EXIT
+
+# ditto keeps the app's code signature, extended attributes and permissions.
+ditto "$APP" "$MOUNT_POINT/MacEQ.app"
+ln -s /Applications "$MOUNT_POINT/Applications"
+mkdir "$MOUNT_POINT/.background"
+cp "$PROJECT_DIR/Resources/dmg-background.tiff" "$MOUNT_POINT/.background/background.tiff"
 
 osascript <<APPLESCRIPT >/dev/null
 tell application "Finder"
@@ -93,11 +102,11 @@ cp "$PROJECT_DIR/Resources/AppIcon.icns" "$MOUNT_POINT/.VolumeIcon.icns"
 SetFile -a C "$MOUNT_POINT"
 
 sync
-hdiutil detach "$MOUNT_POINT" >/dev/null
+diskutil eject "$MOUNT_POINT" >/dev/null
 trap - EXIT
 
 # Compress to a read-only image for distribution.
-hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$FINAL_DMG" >/dev/null
-rm -rf "$STAGING" "$TEMP_DMG"
+diskutil image create from --format "$COMPRESSED_FORMAT" "$TEMP_DMG" "$FINAL_DMG" >/dev/null
+rm -f "$TEMP_DMG"
 
 echo "Built: $FINAL_DMG ($(du -h "$FINAL_DMG" | cut -f1))"
