@@ -31,6 +31,15 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 
+# An ad-hoc signed release would cost every user their audio permission.
+SIGNING_IDENTITY="MacEQ Self-Signed"
+if ! codesign -dvv "$APP" 2>&1 | grep -qx "Authority=$SIGNING_IDENTITY"; then
+    echo "error: $APP is not signed by '$SIGNING_IDENTITY':" >&2
+    codesign -dvv "$APP" 2>&1 | grep -E "^(Authority|Signature)=" >&2 || true
+    echo "Run scripts/create-signing-identity.sh once, then scripts/build-app.sh." >&2
+    exit 1
+fi
+
 # A stale mount from an interrupted run would silently poison the next build.
 if [ -d "$MOUNT_POINT" ]; then
     diskutil eject force "$MOUNT_POINT" >/dev/null 2>&1 || true

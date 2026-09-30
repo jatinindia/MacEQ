@@ -211,12 +211,13 @@ app holding it *could* record everything you hear, including calls. MacEQ
 doesn't, and the source is right here for you to check — but that's the reason to
 be careful about which apps you grant it to, this one included.
 
-**The trust gap you should know about:** MacEQ is ad-hoc signed, not signed with
-an Apple Developer ID and not notarized. Practically, that means macOS can't
-verify who built the app, so it warns you on first launch. It also means a
-released `.dmg` carries no signature proving it came from this repository. If you
-want certainty, build it from source yourself — it's two commands, below. Signing
-and notarizing properly needs a paid Apple Developer account and is on the list.
+**The trust gap you should know about:** MacEQ is signed with its own
+self-signed certificate, not with an Apple Developer ID, and not notarized.
+Practically, that means macOS can't verify who built the app, so it warns you
+on first launch. It also means a released `.dmg` carries no signature proving it
+came from this repository. If you want certainty, build it from source
+yourself — it's two commands, below. Signing and notarizing properly needs a
+paid Apple Developer account and is on the list.
 
 ### Why does macOS block it?
 
@@ -238,9 +239,10 @@ DMG, drag the new MacEQ onto Applications, and confirm the replacement. Quit
 MacEQ from the menu bar first if it is running. Your settings and presets are
 kept. Check your version in **⋯ → About MacEQ**.
 
-After an update macOS asks for the system-audio permission again: MacEQ is
-ad-hoc signed, and each build counts as a new app until it has a Developer ID
-signature.
+Releases after 1.3.1 are all signed with the same certificate, so updating
+keeps the system-audio permission. The first update from 1.3.1 or earlier asks
+for it once more, because those releases were ad-hoc signed and count as a
+different app.
 
 ## Troubleshooting
 
@@ -279,8 +281,13 @@ scripts/build-app.sh
 open build/MacEQ.app
 ```
 
+Without a signing identity, `build-app.sh` signs the app ad-hoc and macOS asks
+for the system-audio permission again after every build. To keep the permission
+across builds, run `scripts/create-signing-identity.sh` once first: it creates a
+self-signed code-signing certificate in your login keychain.
+
 Run the test suite with `swift run maceq-tests`, and package the release disk
-image with `scripts/make-dmg.sh`.
+image with `scripts/make-dmg.sh` (it refuses an ad-hoc signed app).
 
 The app icon and the installer backdrop are both generated rather than
 hand-drawn — `scripts/generate-icon.swift` and
@@ -328,8 +335,7 @@ XCTest needs full Xcode, so MacEQ ships its own.
 ## Roadmap
 
 - Developer ID signing + notarization, so macOS stops warning on first launch.
-- Installing updates automatically (Sparkle), once the app has a Developer ID
-  signature so an update doesn't reset the audio permission.
+- Installing updates from inside the app, in one click.
 
 ## License
 

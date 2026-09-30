@@ -3,9 +3,12 @@
 #
 # Usage: scripts/build-app.sh [debug|release]
 #
-# Ad-hoc signing note: the signature changes on every rebuild, so macOS re-asks
-# for the system-audio-capture permission after each build. Reset a stuck grant
-# with: tccutil reset SystemAudioCaptureRequests com.jatingrewal.maceq
+# Signs with the "MacEQ Self-Signed" identity (scripts/create-signing-identity.sh)
+# so the system-audio permission survives rebuilds and updates. Without it the
+# app is ad-hoc signed: that signature changes on every rebuild, so macOS
+# re-asks for the permission each time, and scripts/make-dmg.sh refuses to
+# package it. Reset a stuck grant with:
+# tccutil reset SystemAudioCaptureRequests com.jatingrewal.maceq
 set -euo pipefail
 
 CONFIGURATION="${1:-release}"
@@ -40,7 +43,14 @@ lipo -create "${BINARIES[@]}" -output "$APP_DIR/Contents/MacOS/MacEQ"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
-codesign --force --sign - "$APP_DIR"
-
-echo "Built and ad-hoc signed: $APP_DIR"
+SIGNING_IDENTITY="MacEQ Self-Signed"
+if security find-identity -v -p codesigning | grep -q "\"$SIGNING_IDENTITY\""; then
+    codesign --force --sign "$SIGNING_IDENTITY" "$APP_DIR"
+    echo "Built and signed with '$SIGNING_IDENTITY': $APP_DIR"
+else
+    codesign --force --sign - "$APP_DIR"
+    echo "warning: no '$SIGNING_IDENTITY' identity (see scripts/create-signing-identity.sh)," >&2
+    echo "warning: so the app is ad-hoc signed and macOS will re-ask for the audio permission." >&2
+    echo "Built and ad-hoc signed: $APP_DIR"
+fi
 echo "Run with: open '$APP_DIR'"
