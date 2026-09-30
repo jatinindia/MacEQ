@@ -33,7 +33,10 @@ fi
 
 # An ad-hoc signed release would cost every user their audio permission.
 SIGNING_IDENTITY="MacEQ Self-Signed"
-if ! codesign -dvv "$APP" 2>&1 | grep -qx "Authority=$SIGNING_IDENTITY"; then
+# Not grep -q: it exits at the first match, codesign dies of SIGPIPE writing
+# its remaining lines, and pipefail turns that into a failure for a correctly
+# signed app.
+if ! codesign -dvv "$APP" 2>&1 | grep -x "Authority=$SIGNING_IDENTITY" >/dev/null; then
     echo "error: $APP is not signed by '$SIGNING_IDENTITY':" >&2
     codesign -dvv "$APP" 2>&1 | grep -E "^(Authority|Signature)=" >&2 || true
     echo "Run scripts/create-signing-identity.sh once, then scripts/build-app.sh." >&2
