@@ -1771,6 +1771,126 @@ func testUpdateCheckTiming() {
     )
 }
 
+/// Harmonic chord with no speech in it: the isolator treats it as background.
+func makeChord(sampleRate: Double, seconds: Double) -> [Float] {
+    let frameCount = Int(sampleRate * seconds)
+    var interleaved = [Float](repeating: 0, count: frameCount * 2)
+    for frame in 0..<frameCount {
+        let time = Double(frame) / sampleRate
+        var sample = 0.0
+        for fundamental in [220.0, 277.2, 329.6] {
+            for harmonic in 1...5 {
+                sample += sin(2 * .pi * fundamental * Double(harmonic) * time) / Double(harmonic * harmonic)
+            }
+        }
+        interleaved[frame * 2] = Float(0.1 * sample)
+        interleaved[frame * 2 + 1] = Float(0.1 * sample)
+    }
+    return interleaved
+}
+
+/// Feeds interleaved stereo through the isolator in the given chunk sizes, in place.
+func isolateChunked(_ isolator: VoiceIsolator, buffer: inout [Float], chunks: [Int]) {
+    var offset = 0
+    buffer.withUnsafeMutableBufferPointer { pointer in
+        for chunk in chunks {
+            isolator.process(interleavedStereo: pointer.baseAddress! + offset * 2, frameCount: chunk)
+            offset += chunk
+        }
+    }
+}
+
+func energyDB(_ interleaved: ArraySlice<Float>) -> Double {
+    let energy = interleaved.reduce(0.0) { $0 + Double($1) * Double($1) }
+    return 10 * log10(max(energy, 1e-20))
+}
+
+func testVoiceIsolatorReportsLatency() {
+    for sampleRate in [44100.0, 48000.0] {
+        do {
+            let isolator = try VoiceIsolator(sampleRate: sampleRate, maxFrames: 4096, mix: 100)
+            let latencySeconds = Double(isolator.latencyFrames) / sampleRate
+            expect(
+                latencySeconds > 0.05 && latencySeconds < 0.1,
+                "stereo latency at \(sampleRate) Hz is ~76 ms, got \(latencySeconds * 1000) ms"
+            )
+        } catch {
+            expect(false, "isolator construction at \(sampleRate) Hz failed: \(error)")
+        }
+    }
+}
+
+func testVoiceIsolatorProcessesUnevenChunks() {
+    do {
+        let isolator = try VoiceIsolator(sampleRate: 48000, maxFrames: 4096, mix: 100)
+        let chunks = [1, 7, 441, 4096, 512, 128, 4096]
+        var buffer = makeChord(sampleRate: 48000, seconds: Double(chunks.reduce(0, +)) / 48000)
+        isolateChunked(isolator, buffer: &buffer, chunks: chunks)
+        expect(isolator.renderFailureCount == 0, "no render failures, last status \(isolator.lastRenderFailureStatus)")
+        expect(buffer.allSatisfy { $0.isFinite }, "output is finite")
+    } catch {
+        expect(false, "isolator construction failed: \(error)")
+    }
+}
+
+func testVoiceIsolatorModesOnNonVoice() {
+    let sampleRate = 48000.0
+    let input = makeChord(sampleRate: sampleRate, seconds: 3)
+    let frameCount = input.count / 2
+    let chunks = [Int](repeating: 512, count: frameCount / 512)
+    // Skip the first second: priming latency plus the model settling.
+    let settled = Int(sampleRate) * 2..<chunks.count * 512 * 2
+    let inputDB = energyDB(input[settled])
+    for (mix, minimumDrop, maximumDrop, label) in [
+        (Float(100), 10.0, Double.infinity, "voice only removes a chord"),
+        (Float(0), -1.0, 1.0, "mix 0 passes a chord"),
+    ] {
+        do {
+            let isolator = try VoiceIsolator(sampleRate: sampleRate, maxFrames: 4096, mix: mix)
+            var buffer = input
+            isolateChunked(isolator, buffer: &buffer, chunks: chunks)
+            let drop = inputDB - energyDB(buffer[settled])
+            expect(drop >= minimumDrop && drop <= maximumDrop, "\(label): dropped \(drop) dB")
+        } catch {
+            expect(false, "\(label): isolator construction failed: \(error)")
+        }
+    }
+}
+
+func testVoiceIsolatorMixChangesLive() {
+    let sampleRate = 48000.0
+    do {
+        let isolator = try VoiceIsolator(sampleRate: sampleRate, maxFrames: 4096, mix: 0)
+        let input = makeChord(sampleRate: sampleRate, seconds: 4)
+        var buffer = input
+        let half = input.count / 4 // frames in two seconds
+        let chunks = [Int](repeating: 480, count: half / 480)
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            var offset = 0
+            for chunk in chunks + chunks {
+                if offset == half {
+                    do {
+                        try isolator.setMix(100)
+                    } catch {
+                        expect(false, "setMix failed: \(error)")
+                    }
+                }
+                isolator.process(interleavedStereo: pointer.baseAddress! + offset * 2, frameCount: chunk)
+                offset += chunk
+            }
+        }
+        let before = energyDB(buffer[Int(sampleRate) * 2..<half * 2])
+        let after = energyDB(buffer[(half + Int(sampleRate)) * 2..<half * 4])
+        expect(before - after >= 10, "raising the mix mid-stream removes the chord: \(before) -> \(after) dB")
+    } catch {
+        expect(false, "isolator construction failed: \(error)")
+    }
+}
+
+testVoiceIsolatorReportsLatency()
+testVoiceIsolatorProcessesUnevenChunks()
+testVoiceIsolatorModesOnNonVoice()
+testVoiceIsolatorMixChangesLive()
 testReleaseVersionParsing()
 testReleaseVersionOrdering()
 testNewerRelease()

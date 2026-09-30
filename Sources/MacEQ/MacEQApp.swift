@@ -1,3 +1,4 @@
+import MacEQCore
 import SwiftUI
 
 /// Starts the audio engine at launch (before the menu-bar popover is ever opened)
@@ -137,6 +138,8 @@ struct EQPopoverView: View {
             }
             .opacity(controller.eqEnabled ? 1 : 0.4)
             .disabled(!controller.eqEnabled)
+            Divider()
+            voiceRow
             Divider()
             footer
         }
@@ -368,6 +371,35 @@ struct EQPopoverView: View {
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
                 .help("Automatically lower gain to prevent clipping from boosted bands")
+        }
+    }
+
+    /// Independent of the EQ bypass switch: it is a different job (what you
+    /// hear, not how it is tuned).
+    private var voiceRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text("Reduce Background")
+                    .font(.caption)
+                Spacer()
+                Toggle("", isOn: $controller.voiceIsolationEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    .help("Keeps voices and turns music and background noise down. Adds ~76 ms of delay while on, so video lip-sync can drift slightly.")
+            }
+            if controller.voiceIsolationEnabled {
+                HStack(spacing: 10) {
+                    Text("Strength")
+                        .font(.caption)
+                    Slider(value: $controller.voiceStrength, in: 0...100)
+                        .controlSize(.small)
+                    Text(String(format: "%.0f%%", controller.voiceStrength))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 56, alignment: .trailing)
+                }
+            }
         }
     }
 

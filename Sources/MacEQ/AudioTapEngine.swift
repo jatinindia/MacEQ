@@ -56,6 +56,12 @@ final class ConvolverHolder {
     var convolver: FIRConvolver?
 }
 
+/// Hands the active voice isolator to the audio thread; nil means the stage is
+/// off (no processing, no added latency). Same lifetime rules as KernelHolder.
+final class IsolatorHolder {
+    var isolator: VoiceIsolator?
+}
+
 /// Single-writer ring of post-EQ mono samples for the spectrum display.
 /// The audio thread writes, the UI thread snapshots; occasional torn reads are
 /// harmless for visualization, so no synchronization is used.
@@ -169,6 +175,7 @@ final class AudioTapEngine {
     let stats = IOStats()
     let kernelHolder = KernelHolder()
     let convolverHolder = ConvolverHolder()
+    let isolatorHolder = IsolatorHolder()
     let captureRing = CaptureRing()
     private let scratch = StereoScratch()
     private(set) var status: EngineStatus?
@@ -348,6 +355,7 @@ final class AudioTapEngine {
             let stats = self.stats
             let kernelHolder = self.kernelHolder
             let convolverHolder = self.convolverHolder
+            let isolatorHolder = self.isolatorHolder
             let captureRing = self.captureRing
             let scratch = self.scratch.samples
             try checkOSStatus(
@@ -391,6 +399,7 @@ final class AudioTapEngine {
                         kernelHolder.lastProcessedKernel = nil
                     }
                     let convolver = convolverHolder.convolver
+                    let isolator = isolatorHolder.isolator
 
                     var offset = 0
                     while offset < frameCount {
@@ -400,8 +409,11 @@ final class AudioTapEngine {
                             var gain = compensationGain
                             vDSP_vsmul(scratch, 1, &gain, scratch, 1, vDSP_Length(chunk * 2))
                         }
-                        // Convolution before the EQ kernel so the kernel's limiter
-                        // stays last in the chain and still catches IR-induced overs.
+                        // Isolation first, so the model hears the mix as played
+                        // rather than as EQ'd. Convolution before the EQ kernel so
+                        // the kernel's limiter stays last in the chain and still
+                        // catches IR-induced overs.
+                        isolator?.process(interleavedStereo: scratch, frameCount: chunk)
                         convolver?.process(interleaved: scratch, frameCount: chunk, channelCount: 2)
                         kernel?.process(interleaved: scratch, frameCount: chunk, channelCount: 2)
                         if captureRing.captureEnabled {

@@ -81,6 +81,11 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
   remembered separately and swap automatically when you change output device.
 - **Convolution / room correction** — load an impulse response (WAV/AIFF) for
   room correction, headphone correction, or reverb effects.
+- **Reduce Background** — turns music and background noise down so you hear
+  mainly the voices (lectures, podcasts, a video with typing in the
+  background). Uses Apple's built-in voice-isolation model, runs on your Mac,
+  and is off by default. While it's on it adds about 76 ms of delay, so video
+  lip-sync can drift slightly, and it removes most of the music from songs.
 - **Safety limiter** — catches clipping from aggressive boosts.
 - **Auto preamp** — automatically pulls gain back so boosted bands don't distort.
 - **Global hotkey** — toggle the EQ from any app. Default `⌥⌘E`, rebindable.
@@ -106,9 +111,11 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 | **Frequency labels** (graphic mode) | **Click the number under a slider** to retune that band. Press Return to apply, Escape to cancel. The band keeps its gain and moves into place if it passes a neighbour. |
 | **Preamp** | Overall level before the EQ. Boosting bands adds energy and can clip; the preamp pulls it back. |
 | **Auto** (next to Preamp) | Computes the preamp for you from the current band gains so nothing clips. Leave this on unless you want manual control — it disables the preamp slider while active. |
+| **Reduce Background** | Keeps voices and turns music and noise down. Works independently of the EQ switch and applies to every output device. Adds about 76 ms of delay while on; switching it on or off causes a brief skip. |
+| **Strength** (when Reduce Background is on) | How far the unwanted part is turned down. The effect is gradual: 50% is only a mild reduction, and most of it happens near 100%. |
 | **Error line** (red, under the title) | Says what went wrong, e.g. a refused import or a failed hotkey. **Click ×** to dismiss it. A problem that's still happening, like the engine waiting to retry, reports again. |
 | **Status dot + line** | Green = engine running. Shows the output device, sample rate, round-trip latency, and CPU use. |
-| **Diagnostics** | Expandable technical detail: callback counts, silent-buffer streak, watchdog restarts, the output route (which of the device's channels left and right play on), convolution taps, multi-output compensation. Useful when reporting a bug. |
+| **Diagnostics** | Expandable technical detail: callback counts, silent-buffer streak, watchdog restarts, the output route (which of the device's channels left and right play on), convolution taps, voice isolation delay, multi-output compensation. Useful when reporting a bug. |
 
 ### Parametric mode
 

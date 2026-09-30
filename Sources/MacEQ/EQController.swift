@@ -119,6 +119,23 @@ final class EQController: ObservableObject {
             rebuildConvolver()
         }
     }
+    /// Reduce Background: keeps voices, turns music and noise down. Global
+    /// rather than per-device: it depends on what is playing, not on what it
+    /// plays through. Off by default; it strips music from songs.
+    @Published var voiceIsolationEnabled: Bool {
+        didSet {
+            defaults.set(voiceIsolationEnabled, forKey: "voiceIsolationEnabled")
+            updateIsolator()
+        }
+    }
+    /// 0–100 %, applied live to the running isolator (no rebuild, so dragging
+    /// the slider doesn't re-prime its delay line).
+    @Published var voiceStrength: Double {
+        didSet {
+            defaults.set(voiceStrength, forKey: "voiceStrength")
+            applyVoiceMix()
+        }
+    }
     /// Display name of the loaded impulse response file, nil when none is set.
     @Published private(set) var impulseResponseName: String?
     @Published private(set) var namedPresets: [NamedPreset] = []
@@ -166,6 +183,7 @@ final class EQController: ObservableObject {
     /// forbidden on the real-time thread).
     private var retiredKernels: [EQKernel] = []
     private var retiredConvolvers: [FIRConvolver] = []
+    private var retiredIsolators: [VoiceIsolator] = []
     private var impulseResponseURL: URL?
     /// One block of added latency; 512 frames ≈ 10.7 ms at 48 kHz.
     static let convolutionBlockSize = 512
@@ -211,6 +229,8 @@ final class EQController: ObservableObject {
         excludedBundleIDs = Set(defaults.stringArray(forKey: "excludedBundleIDs") ?? [])
         bufferFrames = defaults.object(forKey: "bufferFrames") as? Int ?? 0
         convolutionEnabled = defaults.object(forKey: "convolutionEnabled") as? Bool ?? false
+        voiceIsolationEnabled = defaults.object(forKey: "voiceIsolationEnabled") as? Bool ?? false
+        voiceStrength = min(max(defaults.object(forKey: "voiceStrength") as? Double ?? 100, 0), 100)
         if let path = defaults.string(forKey: "impulseResponsePath") {
             impulseResponseURL = URL(fileURLWithPath: path)
             impulseResponseName = (path as NSString).lastPathComponent
@@ -362,6 +382,7 @@ final class EQController: ObservableObject {
             loadProfileForCurrentDevice()
             rebuildKernel()
             rebuildConvolver()
+            updateIsolator()
             startPolling()
         } catch {
             engine.stop()
@@ -394,6 +415,8 @@ final class EQController: ObservableObject {
         engine.kernelHolder.kernel = nil
         retireConvolver(engine.convolverHolder.convolver)
         engine.convolverHolder.convolver = nil
+        retireIsolator(engine.isolatorHolder.isolator)
+        engine.isolatorHolder.isolator = nil
         engine.stop()
         isRunning = false
         statusModel.summary = "Not running"
@@ -785,6 +808,48 @@ final class EQController: ObservableObject {
         retiredConvolvers.append(convolver)
         if retiredConvolvers.count > 4 {
             retiredConvolvers.removeFirst(retiredConvolvers.count - 4)
+        }
+    }
+
+    /// Puts an isolator in the chain while voice isolation is on and removes it
+    /// when off. Created only on demand: the unit loads ~35–50 MB of system
+    /// frameworks on first use.
+    private func updateIsolator() {
+        guard isRunning, voiceIsolationEnabled else {
+            retireIsolator(engine.isolatorHolder.isolator)
+            engine.isolatorHolder.isolator = nil
+            return
+        }
+        // Already running: rebuilding would restart its ~76 ms delay line.
+        guard engine.isolatorHolder.isolator == nil else { return }
+        let sampleRate = engine.status?.sampleRate ?? 48000
+        do {
+            engine.isolatorHolder.isolator = try VoiceIsolator(
+                sampleRate: sampleRate,
+                maxFrames: StereoScratch.capacityFrames,
+                mix: Float(voiceStrength)
+            )
+        } catch {
+            errorMessage = "Voice isolation unavailable: \(error)"
+        }
+    }
+
+    private func applyVoiceMix() {
+        guard let isolator = engine.isolatorHolder.isolator else { return }
+        do {
+            try isolator.setMix(Float(voiceStrength))
+        } catch {
+            errorMessage = "Voice isolation strength change failed: \(error)"
+        }
+    }
+
+    /// Two are enough: the audio thread holds at most the one it is running.
+    /// Kept small because each holds a live Audio Unit instance.
+    private func retireIsolator(_ isolator: VoiceIsolator?) {
+        guard let isolator else { return }
+        retiredIsolators.append(isolator)
+        if retiredIsolators.count > 2 {
+            retiredIsolators.removeFirst(retiredIsolators.count - 2)
         }
     }
 
@@ -1251,7 +1316,23 @@ final class EQController: ObservableObject {
                 20 * log10(Double(status.tapCompensationGain))
             ))
         }
-        statusModel.diagnosticLines = lines + convolutionDiagnostics(sampleRate: status.sampleRate) + engine.diagnostics()
+        statusModel.diagnosticLines = lines
+            + convolutionDiagnostics(sampleRate: status.sampleRate)
+            + voiceIsolationDiagnostics(sampleRate: status.sampleRate)
+            + engine.diagnostics()
+    }
+
+    private func voiceIsolationDiagnostics(sampleRate: Double) -> [String] {
+        guard let isolator = engine.isolatorHolder.isolator else { return [] }
+        var line = String(
+            format: "Voice isolation: strength %.0f%% · +%.1f ms",
+            voiceStrength,
+            Double(isolator.latencyFrames) / sampleRate * 1000
+        )
+        if isolator.renderFailureCount > 0 {
+            line += " · render failures (silenced): \(isolator.renderFailureCount), last OSStatus \(isolator.lastRenderFailureStatus)"
+        }
+        return [line]
     }
 
     private func convolutionDiagnostics(sampleRate: Double) -> [String] {
