@@ -1131,6 +1131,33 @@ func testCallbackStallCounting() {
     expect(callbackStallTicksBeforeRestart == 2, "a stall needs two watchdog ticks (~4 s) without callbacks")
 }
 
+// MARK: - Tap exclusions
+
+func testTapExclusion() {
+    let none: Set<String> = []
+    let inCall = AudioProcessSnapshot(appBundleID: "net.whatsapp.WhatsApp", isRunningInput: true, isRunningOutput: true)
+    expect(
+        shouldExcludeFromTap(inCall, userExcludedBundleIDs: none),
+        "an app recording and playing at once (a call) plays directly, or macOS ducks its voice"
+    )
+    let playing = AudioProcessSnapshot(appBundleID: "com.spotify.client", isRunningInput: false, isRunningOutput: true)
+    expect(!shouldExcludeFromTap(playing, userExcludedBundleIDs: none), "an app that only plays is equalized")
+    let recording = AudioProcessSnapshot(appBundleID: "com.apple.VoiceMemos", isRunningInput: true, isRunningOutput: false)
+    expect(
+        !shouldExcludeFromTap(recording, userExcludedBundleIDs: none),
+        "an app that only records stays in the tap (no rebuild for dictation)"
+    )
+    expect(
+        shouldExcludeFromTap(playing, userExcludedBundleIDs: ["com.spotify.client"]),
+        "a user-excluded app is excluded whether or not it is in a call"
+    )
+    let unknownApp = AudioProcessSnapshot(appBundleID: nil, isRunningInput: false, isRunningOutput: true)
+    expect(
+        !shouldExcludeFromTap(unknownApp, userExcludedBundleIDs: ["com.spotify.client"]),
+        "a process with no known app is equalized unless it is in a call"
+    )
+}
+
 // MARK: - Kernel swaps (every slider tick builds a new kernel)
 
 /// Sections numbered by position, for kernels that are never swapped.
@@ -1911,6 +1938,7 @@ testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
 testEngineRestartDelayBacksOff()
 testCallbackStallCounting()
+testTapExclusion()
 testKernelSwapWithSameFiltersIsSeamless()
 testKernelSwapAcrossPrunedSectionIsSeamless()
 testKernelSwapRampsPreampChange()

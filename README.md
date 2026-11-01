@@ -90,6 +90,10 @@ There is no Dock icon and no main window. MacEQ is a menu-bar-only app.
 - **Auto preamp** — automatically pulls gain back so boosted bands don't distort.
 - **Global hotkey** — toggle the EQ from any app. Default `⌥⌘E`, rebindable.
 - **App exclude list** — leave chosen apps unequalized.
+- **Calls stay at full volume** — while an app is on a call (using the mic and
+  playing at once: WhatsApp, FaceTime, Zoom, Meet), its audio skips MacEQ and
+  plays directly, so macOS's call ducking doesn't turn the other person down.
+  It's equalized again as soon as the call ends.
 - **Launch at login**, buffer-size control, live latency/CPU readout.
 - **Self-healing** — follows default-device changes, sample-rate changes and
   Bluetooth renegotiation. If the audio path can't start (a Bluetooth device
@@ -265,7 +269,8 @@ different app.
 | Everything gets quieter when the EQ is on | That's the **Auto preamp** doing its job: with boosted bands it lowers the overall level by the size of your largest boost so it can't clip. The exact cut is shown next to the Preamp slider. Uncheck **Auto** to keep loudness (the limiter still protects against clipping), or use cuts instead of boosts. With all bands flat, MacEQ is acoustically transparent — measurably identical to bypass. |
 | Audio mutes right after first launch | Answer the system-audio permission dialog — audio stays muted while the prompt is open. |
 | Crackles/dropouts | ⋯ → Buffer Size → a larger value. |
-| Nothing is equalized | Check the master switch is on, and that the app isn't in the exclude list. |
+| Nothing is equalized | Check the master switch is on, and that the app isn't in the exclude list. Apps on a call (mic and speaker in use) are never equalized — see below. |
+| A call isn't equalized | Intentional. During a call macOS ducks every other app's audio, and the call's voice, replayed through MacEQ, would be ducked with it. So an app using the mic and playing at once plays directly until the call ends. |
 
 ## Build from source
 

@@ -269,6 +269,31 @@ func audioProcessIsRunning(_ objectID: AudioObjectID) throws -> Bool {
     return running != 0
 }
 
+/// Whether an audio process is recording right now. Together with
+/// audioProcessIsRunningOutput, how a call is recognised (see shouldExcludeFromTap).
+func audioProcessIsRunningInput(_ objectID: AudioObjectID) throws -> Bool {
+    var address = propertyAddress(kAudioProcessPropertyIsRunningInput)
+    var running: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    try checkOSStatus(
+        AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &running),
+        "AudioObjectGetPropertyData(kAudioProcessPropertyIsRunningInput, object \(objectID))"
+    )
+    return running != 0
+}
+
+/// Whether an audio process is playing right now.
+func audioProcessIsRunningOutput(_ objectID: AudioObjectID) throws -> Bool {
+    var address = propertyAddress(kAudioProcessPropertyIsRunningOutput)
+    var running: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    try checkOSStatus(
+        AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &running),
+        "AudioObjectGetPropertyData(kAudioProcessPropertyIsRunningOutput, object \(objectID))"
+    )
+    return running != 0
+}
+
 /// The bundle ID Core Audio records for an audio process (works for helper
 /// processes that NSRunningApplication cannot see).
 func bundleID(ofAudioProcess objectID: AudioObjectID) throws -> String {

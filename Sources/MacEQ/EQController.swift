@@ -258,24 +258,32 @@ final class EQController: ObservableObject {
 
     // MARK: - Exclude list
 
-    /// Core Audio process objects whose *responsible app* is excluded.
+    /// Core Audio process objects the tap must leave out: those whose
+    /// *responsible app* is excluded, and those in a call (see shouldExcludeFromTap).
     ///
     /// Browser/Electron audio comes from helper processes (WebKit GPU, Chrome
     /// Helper) whose own bundle IDs never match the app the user excluded, so each
     /// audio process is attributed to the app responsible for it (the same mapping
     /// Activity Monitor uses) before checking the exclude set.
     private func resolveExcludedAudioProcesses() -> (objects: [AudioObjectID], pids: [pid_t]) {
-        guard !excludedBundleIDs.isEmpty else { return ([], []) }
         var objects: [AudioObjectID] = []
         var pids: [pid_t] = []
+        let selfPID = getpid()
         do {
             for object in try audioProcessObjectIDs() {
                 let processPID = try pid(ofAudioProcess: object)
-                guard processPID > 0 else { continue }
+                // Ourselves too: our aggregate records the tap, so we look like
+                // a call, and the engine already excludes us.
+                guard processPID > 0, processPID != selfPID else { continue }
                 let responsiblePID = responsibility_get_pid_responsible_for_pid(processPID)
                 let bundleID = NSRunningApplication(processIdentifier: responsiblePID)?.bundleIdentifier
                     ?? NSRunningApplication(processIdentifier: processPID)?.bundleIdentifier
-                if let bundleID, excludedBundleIDs.contains(bundleID) {
+                let snapshot = AudioProcessSnapshot(
+                    appBundleID: bundleID,
+                    isRunningInput: try audioProcessIsRunningInput(object),
+                    isRunningOutput: try audioProcessIsRunningOutput(object)
+                )
+                if shouldExcludeFromTap(snapshot, userExcludedBundleIDs: excludedBundleIDs) {
                     objects.append(object)
                     pids.append(processPID)
                 }
@@ -294,11 +302,12 @@ final class EQController: ObservableObject {
     private var lastExcludedPIDs: [pid_t] = []
     private var exclusionRecheck: DispatchWorkItem?
 
-    /// Core Audio's process list changed. If the resolved excluded process set
-    /// differs from what the tap was built with, rebuild it (debounced — process
-    /// churn is bursty and each rebuild briefly interrupts audio).
+    /// Core Audio's process list changed, or a process started or stopped
+    /// recording or playing (a call beginning or ending). If the resolved
+    /// excluded process set differs from what the tap was built with, rebuild it
+    /// (debounced — process churn is bursty and each rebuild briefly interrupts audio).
     private func scheduleExclusionRecheck() {
-        guard isRunning, !excludedBundleIDs.isEmpty else { return }
+        guard isRunning else { return }
         exclusionRecheck?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isRunning else { return }

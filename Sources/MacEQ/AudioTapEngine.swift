@@ -183,7 +183,9 @@ final class AudioTapEngine {
     /// Called on the main queue when the system default output device changes.
     var onDefaultOutputDeviceChanged: (() -> Void)?
     /// Called on the main queue when Core Audio's process list changes (an app
-    /// started/stopped doing audio). Owners re-check the exclude list on this.
+    /// started/stopped doing audio), or when a process starts or stops
+    /// recording or playing (a call beginning or ending). Owners re-check the
+    /// exclude list on this.
     var onProcessListChanged: (() -> Void)?
     /// Called on the main queue when the active output device renegotiates its
     /// nominal sample rate while running (e.g. 44.1 <-> 48 kHz on Bluetooth).
@@ -199,6 +201,11 @@ final class AudioTapEngine {
     var preferredBufferFrames: UInt32 = 0
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var processListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Running-state listeners, one per audio process object other than our
+    /// own, so a call starting in an app that was already an audio client is
+    /// still noticed (its process object exists already, so the process list
+    /// doesn't change).
+    private var processRunningListenerBlocks: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     private var sampleRateListenerBlock: AudioObjectPropertyListenerBlock?
     private var sampleRateListenerDevice = AudioObjectID(kAudioObjectUnknown)
 
@@ -232,6 +239,7 @@ final class AudioTapEngine {
             mElement: kAudioObjectPropertyElementMain
         )
         let processBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.refreshProcessRunningListeners()
             self?.onProcessListChanged?()
         }
         let processStatus = AudioObjectAddPropertyListenerBlock(
@@ -245,6 +253,59 @@ final class AudioTapEngine {
         } else {
             // Non-fatal: exclude list won't self-heal when excluded apps launch.
             print("warning: process-list listener failed with OSStatus \(processStatus)")
+        }
+        refreshProcessRunningListeners()
+    }
+
+    /// kAudioProcessPropertyIsRunning, not IsRunningInput/IsRunningOutput:
+    /// measured on macOS 27, those two never notify listeners, so a call
+    /// starting in a known app went unnoticed. IsRunning does, and the
+    /// exclusion recheck then reads input and output directly.
+    private static let processRunningAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyIsRunning,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Keeps exactly one running-state listener on every current audio process
+    /// object except our own. Main queue only.
+    ///
+    /// Never on our own: with a listener on it, AudioDeviceCreateIOProcIDWithBlock
+    /// in start() blocked forever waiting on coreaudiod (measured: every start,
+    /// main thread stuck in HALC_ProxyIOContext::_TellServerAboutStreamUsage).
+    /// The tap already existed by then, so all system audio stayed muted.
+    private func refreshProcessRunningListeners() {
+        let objects: [AudioObjectID]
+        let selfObject: AudioObjectID
+        do {
+            objects = try audioProcessObjectIDs()
+            selfObject = try processObjectID(forPID: getpid())
+        } catch {
+            // Non-fatal: calls that start in an already-listed app won't be
+            // noticed until the process list next changes. Retried on that change.
+            print("warning: process running-state listener refresh failed: \(error)")
+            return
+        }
+        for (object, block) in processRunningListenerBlocks where !objects.contains(object) {
+            // The object is gone and its listener with it; removal fails with
+            // a bad-object status, which is expected here.
+            var address = Self.processRunningAddress
+            AudioObjectRemovePropertyListenerBlock(object, &address, DispatchQueue.main, block)
+            processRunningListenerBlocks[object] = nil
+        }
+        for object in objects where object != selfObject && processRunningListenerBlocks[object] == nil {
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.onProcessListChanged?()
+            }
+            var address = Self.processRunningAddress
+            let status = AudioObjectAddPropertyListenerBlock(object, &address, DispatchQueue.main, block)
+            if status == noErr {
+                processRunningListenerBlocks[object] = block
+            } else {
+                // Non-fatal: a call in this process won't be noticed until the
+                // process list next changes. Retried on that change.
+                print("warning: process \(object) running-state listener failed with OSStatus \(status)")
+            }
         }
     }
 
@@ -559,6 +620,10 @@ final class AudioTapEngine {
                 DispatchQueue.main,
                 processListenerBlock
             )
+        }
+        for (object, block) in processRunningListenerBlocks {
+            var address = Self.processRunningAddress
+            AudioObjectRemovePropertyListenerBlock(object, &address, DispatchQueue.main, block)
         }
         stop()
     }
