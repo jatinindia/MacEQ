@@ -39,6 +39,10 @@ struct DeviceProfile: Codable {
     var convolutionEnabled: Bool?
     // Optional so profiles saved before custom bands existed still decode.
     var bandFrequencies: [Double]?
+    // Where this device's curve came from (preset name or imported file) and
+    // the curve it had then; optional so older profiles still decode.
+    var presetName: String?
+    var presetFingerprint: String?
 }
 
 /// Live spectrum levels, kept out of EQController on purpose: the popover
@@ -139,6 +143,10 @@ final class EQController: ObservableObject {
     /// Display name of the loaded impulse response file, nil when none is set.
     @Published private(set) var impulseResponseName: String?
     @Published private(set) var namedPresets: [NamedPreset] = []
+    /// Name of the preset or imported file the current curve came from, and
+    /// the curve's fingerprint at that moment (see curveFingerprint).
+    @Published private(set) var presetSourceName: String?
+    private var presetSourceFingerprint: String?
 
     @Published private(set) var isRunning = false
     @Published private(set) var errorMessage: String?
@@ -239,6 +247,8 @@ final class EQController: ObservableObject {
            let presets = try? JSONDecoder().decode([NamedPreset].self, from: data) {
             namedPresets = presets
         }
+        presetSourceName = defaults.string(forKey: "presetSourceName")
+        presetSourceFingerprint = defaults.string(forKey: "presetSourceFingerprint")
         launchAtLogin = SMAppService.mainApp.status == .enabled
         // false until the user answers the one-time question (see setUpUpdateChecks).
         updateChecksEnabled = defaults.object(forKey: "updateChecksEnabled") as? Bool ?? false
@@ -537,7 +547,9 @@ final class EQController: ObservableObject {
             eqEnabled: eqEnabled,
             impulseResponsePath: impulseResponseURL?.path,
             convolutionEnabled: convolutionEnabled,
-            bandFrequencies: bands.map(\.frequency)
+            bandFrequencies: bands.map(\.frequency),
+            presetName: presetSourceName,
+            presetFingerprint: presetSourceFingerprint
         )
         do {
             defaults.set(try JSONEncoder().encode(profiles), forKey: "deviceProfiles")
@@ -576,6 +588,7 @@ final class EQController: ObservableObject {
             impulseResponseName = nil
         }
         convolutionEnabled = profile.convolutionEnabled ?? false
+        setPresetSource(name: profile.presetName, fingerprint: profile.presetFingerprint)
     }
 
     private func persist() {
@@ -667,7 +680,7 @@ final class EQController: ObservableObject {
     }
 
     /// Imports an APO/AutoEQ preset file (ParametricEQ.txt, config.txt) chosen
-    /// in an open panel. Parse errors surface via configParseError + errorMessage.
+    /// in an open panel and saves it as a named preset under the file's name. Parse errors surface via configParseError + errorMessage.
     func importPresetFromFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.plainText]
@@ -680,6 +693,10 @@ final class EQController: ObservableObject {
             applyConfigText(text)
             if let parseError = configParseError {
                 errorMessage = "Import failed — \(parseError)"
+            } else {
+                // Also keep it as a named preset (replacing one of the same
+                // name), which records it as the curve's source too.
+                saveCurrentAsPreset(named: url.deletingPathExtension().lastPathComponent)
             }
         } catch {
             errorMessage = "Could not read \(url.lastPathComponent): \(error)"
@@ -722,6 +739,8 @@ final class EQController: ObservableObject {
         namedPresets.removeAll { $0.name == trimmed }
         namedPresets.append(preset)
         persistNamedPresets()
+        setPresetSource(name: trimmed)
+        saveProfileForCurrentDevice()
     }
 
     /// Applies a named preset to the current device (one rebuild, not one per field).
@@ -739,8 +758,62 @@ final class EQController: ObservableObject {
         if let parsed = try? parseAPOConfig(preset.parametricConfig).preset {
             parametricFilters = parsed.filters
         }
+        setPresetSource(name: preset.name)
         isApplyingProfile = false
         settingsChanged()
+    }
+
+    /// What the header shows: the source name, "(edited)" once the curve has
+    /// changed since, or "Custom" when the curve has no known source. A curve
+    /// with no recorded source still gets a name if it matches a saved preset.
+    var presetDisplayName: String {
+        let current = currentCurveFingerprint()
+        if let name = presetSourceName {
+            return presetSourceFingerprint == current ? name : "\(name) (edited)"
+        }
+        if let match = namedPresets.last(where: { Self.fingerprint(of: $0) == current }) {
+            return match.name
+        }
+        return "Custom"
+    }
+
+    /// Records the curve's source and its current fingerprint (nil name clears).
+    private func setPresetSource(name: String?, fingerprint: String? = nil) {
+        presetSourceName = name
+        presetSourceFingerprint = name == nil ? nil : (fingerprint ?? currentCurveFingerprint())
+        defaults.set(presetSourceName, forKey: "presetSourceName")
+        defaults.set(presetSourceFingerprint, forKey: "presetSourceFingerprint")
+    }
+
+    private func currentCurveFingerprint() -> String {
+        Self.curveFingerprint(
+            mode: mode.rawValue, frequencies: bands.map(\.frequency), gains: gains,
+            filters: parametricFilters, manualPreampDB: manualPreampDB, autoPreamp: autoPreampEnabled
+        )
+    }
+
+    private static func fingerprint(of preset: NamedPreset) -> String? {
+        guard let parsed = try? parseAPOConfig(preset.parametricConfig).preset else { return nil }
+        return curveFingerprint(
+            mode: preset.mode, frequencies: preset.bandFrequencies ?? defaultGraphicBandFrequencies,
+            gains: preset.gains, filters: parsed.filters,
+            manualPreampDB: preset.manualPreampDB, autoPreamp: preset.autoPreampEnabled
+        )
+    }
+
+    /// Identifies what's audible: only the active mode's curve plus the preamp,
+    /// so idle graphic gains don't count against a parametric preset. Values go
+    /// through the APO serializer's rounding, so tiny float noise is ignored.
+    private static func curveFingerprint(
+        mode: String, frequencies: [Double], gains: [Double], filters: [FilterSpec],
+        manualPreampDB: Double, autoPreamp: Bool
+    ) -> String {
+        let preamp = autoPreamp ? "auto" : String(format: "%.1f", manualPreampDB)
+        if mode == EQMode.parametric.rawValue {
+            return "P|\(preamp)|" + serializeAPOConfig(EQPreset(preampDB: 0, filters: filters))
+        }
+        let bandText = zip(frequencies, gains).map { String(format: "%.1f:%.1f", $0, $1) }
+        return "G|\(preamp)|" + bandText.joined(separator: ",")
     }
 
     func deletePreset(named name: String) {

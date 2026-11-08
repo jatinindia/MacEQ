@@ -153,6 +153,12 @@ struct EQPopoverView: View {
         HStack {
             Text("MacEQ")
                 .font(.headline)
+            Text(controller.presetDisplayName)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help("Active preset: \(controller.presetDisplayName)")
             Spacer()
             Toggle("", isOn: $controller.eqEnabled)
                 .toggleStyle(.switch)
