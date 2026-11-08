@@ -1275,23 +1275,28 @@ final class EQController: ObservableObject {
 
     // MARK: - Spectrum display
 
-    static let spectrumBands = logSpacedFrequencies(from: 20, to: 20000, count: 48)
-    private let analyzer = SpectrumAnalyzer(fftSize: 2048)
+    static let spectrumBands = logSpacedFrequencies(from: 20, to: 20000, count: 64)
+    /// 4096 points (~12 Hz bins at 48 kHz) so the low bands are not all
+    /// reading the same one or two bins.
+    private let analyzer = SpectrumAnalyzer(fftSize: 4096)
+    private var spectrumSmoother = SpectrumSmoother()
     private var spectrumTimer: Timer?
 
-    /// ~20 fps spectrum updates; runs only while a curve view is visible.
+    /// ~30 fps spectrum updates; runs only while a curve view is visible.
     func startSpectrum() {
         guard spectrumTimer == nil else { return }
         engine.captureRing.captureEnabled = true
-        spectrumTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
+        spectrumSmoother.reset()
+        spectrumTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 guard let analyzer = self.analyzer, self.isRunning else { return }
-                self.spectrum.levelsDB = analyzer.bandMagnitudesDB(
+                let raw = analyzer.bandMagnitudesDB(
                     samples: self.engine.captureRing.latest(analyzer.fftSize),
                     sampleRate: self.currentSampleRate,
                     bandFrequencies: Self.spectrumBands
                 )
+                self.spectrum.levelsDB = self.spectrumSmoother.process(raw)
             }
         }
     }
