@@ -67,7 +67,7 @@ struct EQPopoverView: View {
     @FocusState private var bandFieldFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             header
             if let version = controller.availableUpdateVersion {
                 HStack(spacing: 6) {
@@ -107,21 +107,16 @@ struct EQPopoverView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .controlSize(.small)
                 if controller.mode == .graphic {
-                    Spacer()
-                    Button {
+                    IconButton(systemName: "plus", help: "Add a band at a custom frequency") {
                         showAddBand.toggle()
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .controlSize(.small)
-                    .help("Add a band at a custom frequency")
-                    Button("Reset") {
+                    IconButton(
+                        systemName: "arrow.counterclockwise",
+                        help: "Reset all bands to 0 dB (this device's profile only)"
+                    ) {
                         controller.resetAllBands()
                     }
-                    .controlSize(.small)
-                    .help("Reset all bands to 0 dB (this device's profile only)")
                 }
             }
             if controller.mode == .graphic, showAddBand {
@@ -134,28 +129,60 @@ struct EQPopoverView: View {
                 } else {
                     ParametricView(controller: controller)
                 }
-                preampRow
             }
             .opacity(controller.eqEnabled ? 1 : 0.4)
             .disabled(!controller.eqEnabled)
-            Divider()
-            voiceRow
-            Divider()
+            VStack(spacing: 0) {
+                preampRow
+                    .opacity(controller.eqEnabled ? 1 : 0.4)
+                    .disabled(!controller.eqEnabled)
+                Divider().padding(.horizontal, 12)
+                voiceRow
+            }
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
             footer
         }
-        .padding(16)
+        .padding(18)
         .frame(width: 400)
         .onAppear { controller.popoverIsVisible = true }
         .onDisappear { controller.popoverIsVisible = false }
     }
 
     private var header: some View {
-        HStack {
-            Text("MacEQ")
-                .font(.headline)
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(controller.eqEnabled ? "MacEQ" : "MacEQ - bypassed")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Menu {
+                    presetMenuItems
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(controller.presetDisplayName)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(controller.eqEnabled ? .primary : .secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                // .button + .plain draws the label as laid out (borderlessButton
+                // moves the chevron to the left) and without a focus ring.
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .focusEffectDisabled()
+                // No fixedSize: a long name (e.g. "... (edited)") must truncate
+                // rather than widen the popover's content past its margins.
+                .help("Active preset: \(controller.presetDisplayName). Click to switch presets.")
+            }
             Spacer()
             Toggle("", isOn: $controller.eqEnabled)
                 .toggleStyle(.switch)
+                .labelsHidden()
                 .controlSize(.small)
                 .help("Enable or bypass the equalizer (\(controller.hotkeyDisplay) anywhere)")
             Menu {
@@ -188,26 +215,7 @@ struct EQPopoverView: View {
                 }
                 Divider()
                 Menu("Presets") {
-                    ForEach(controller.namedPresets, id: \.name) { preset in
-                        Button(preset.name) { controller.applyPreset(preset) }
-                    }
-                    if controller.namedPresets.isEmpty {
-                        Text("No saved presets")
-                    }
-                    Divider()
-                    Button("Save Current as Preset…") {
-                        openWindow(id: "save-preset")
-                        NSApplication.shared.activate(ignoringOtherApps: true)
-                    }
-                    if !controller.namedPresets.isEmpty {
-                        Menu("Delete Preset") {
-                            ForEach(controller.namedPresets, id: \.name) { preset in
-                                Button(preset.name, role: .destructive) {
-                                    controller.deletePreset(named: preset.name)
-                                }
-                            }
-                        }
-                    }
+                    presetMenuItems
                 }
                 Button("Import Preset…") { controller.importPresetFromFile() }
                 Button("Export Preset…") { controller.exportPresetToFile() }
@@ -226,10 +234,39 @@ struct EQPopoverView: View {
                 }
                 Button("Quit MacEQ") { NSApplication.shared.terminate(nil) }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
+            .help("More options")
+        }
+    }
+
+    /// Shared by the clickable preset name in the header and the "..." menu.
+    @ViewBuilder
+    private var presetMenuItems: some View {
+        ForEach(controller.namedPresets, id: \.name) { preset in
+            Button(preset.name) { controller.applyPreset(preset) }
+        }
+        if controller.namedPresets.isEmpty {
+            Text("No saved presets")
+        }
+        Divider()
+        Button("Save Current as Preset…") {
+            openWindow(id: "save-preset")
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+        if !controller.namedPresets.isEmpty {
+            Menu("Delete Preset") {
+                ForEach(controller.namedPresets, id: \.name) { preset in
+                    Button(preset.name, role: .destructive) {
+                        controller.deletePreset(named: preset.name)
+                    }
+                }
+            }
         }
     }
 
@@ -356,31 +393,34 @@ struct EQPopoverView: View {
     private var preampRow: some View {
         HStack(spacing: 10) {
             Text("Preamp")
-                .font(.caption)
+                .font(.system(size: 12))
+                .frame(width: 64, alignment: .leading)
             Slider(
                 value: $controller.manualPreampDB,
                 in: EQController.gainRange
             )
-            .controlSize(.small)
+            .controlSize(.mini)
             .disabled(controller.autoPreampEnabled)
             Text(String(format: "%+.1f dB", controller.effectivePreampDB))
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 11).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .trailing)
+                .frame(width: 50, alignment: .trailing)
             Toggle("Auto", isOn: $controller.autoPreampEnabled)
-                .toggleStyle(.checkbox)
+                .toggleStyle(.button)
                 .controlSize(.small)
                 .help("Automatically lower gain to prevent clipping from boosted bands")
         }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
     }
 
     /// Independent of the EQ bypass switch: it is a different job (what you
     /// hear, not how it is tuned).
     private var voiceRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                Text("Reduce Background")
-                    .font(.caption)
+                Text("Reduce background noise")
+                    .font(.system(size: 12))
                 Spacer()
                 Toggle("", isOn: $controller.voiceIsolationEnabled)
                     .toggleStyle(.switch)
@@ -388,19 +428,24 @@ struct EQPopoverView: View {
                     .labelsHidden()
                     .help("Keeps voices and turns music and background noise down. Adds ~76 ms of delay while on, so video lip-sync can drift slightly.")
             }
+            .frame(height: 40)
             if controller.voiceIsolationEnabled {
                 HStack(spacing: 10) {
                     Text("Strength")
-                        .font(.caption)
-                    Slider(value: $controller.voiceStrength, in: 0...100)
-                        .controlSize(.small)
-                    Text(String(format: "%.0f%%", controller.voiceStrength))
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
+                        .frame(width: 64, alignment: .leading)
+                    Slider(value: $controller.voiceStrength, in: 0...100)
+                        .controlSize(.mini)
+                    Text(String(format: "%.0f%%", controller.voiceStrength))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 50, alignment: .trailing)
                 }
+                .padding(.bottom, 12)
             }
         }
+        .padding(.horizontal, 12)
     }
 
     private var footer: some View {
@@ -418,31 +463,37 @@ struct EQPopoverView: View {
 struct StatusFooterView: View {
     let isRunning: Bool
     @ObservedObject var statusModel: EngineStatusModel
+    @State private var showDiagnostics = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
                 Circle()
                     .fill(isRunning ? Color.green : Color.red)
-                    .frame(width: 7, height: 7)
+                    .frame(width: 6, height: 6)
                 Text(statusModel.summary)
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                IconButton(
+                    systemName: showDiagnostics ? "chevron.up" : "info.circle",
+                    help: showDiagnostics ? "Hide diagnostics" : "Show diagnostics"
+                ) {
+                    showDiagnostics.toggle()
+                }
             }
-            DisclosureGroup {
+            if showDiagnostics {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(statusModel.diagnosticLines, id: \.self) { line in
                         Text(line)
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            } label: {
-                Text("Diagnostics")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
         }
     }

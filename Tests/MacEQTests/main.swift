@@ -1065,6 +1065,45 @@ func testFiltersAtOrAboveNyquistPassThroughStably() {
     expect(!isIdentitySection(belowNyquist), "11 kHz band at 24 kHz is still a real filter")
 }
 
+// MARK: - Spectrum smoother
+
+func testSpectrumSmoother() {
+    var smoother = SpectrumSmoother(attack: 0.5, release: 0.1, blurRadius: 1, sigma: 1)
+    // A lone spike is spread to its neighbours and lowered.
+    let spiky = [-80.0, -80.0, 0.0, -80.0, -80.0]
+    let first = smoother.process(spiky)
+    expect(first[2] < -10 && first[2] > -60, "spike is softened, got \(first[2])")
+    expect(first[1] > -80 && first[3] > -80, "neighbours pick up the spike")
+    expectClose(first[1], first[3], tolerance: 1e-9, "blur is symmetric")
+    // Flat input stays flat.
+    smoother.reset()
+    let flat = smoother.process([-40, -40, -40])
+    expect(flat.allSatisfy { abs($0 + 40) < 1e-9 }, "flat input is unchanged")
+    // Falls slower than it rises.
+    let fall = smoother.process([-80, -80, -80])[1]
+    smoother.reset()
+    _ = smoother.process([-80, -80, -80])
+    let rise = smoother.process([-40, -40, -40])[1]
+    expect((rise + 80) > (-40 - fall), "attack is faster than release")
+}
+
+func testSpectrumAutoRange() {
+    var range = SpectrumAutoRange(span: 50, headroom: 0.1, releasePerFrame: 1, minimumReferenceDB: -40)
+    // Quiet music (peak -30 dBFS) still reaches near the top.
+    let quiet = range.normalize([-30, -55, -80, -100])
+    expectClose(quiet[0], 0.9, tolerance: 1e-9, "loudest band sits below the headroom")
+    expectClose(quiet[1], 0.45, tolerance: 1e-9, "25 dB down is half the span")
+    expect(quiet[2] == 0 && quiet[3] == 0, "below the span is floored")
+    // Reference sinks slowly when the level drops.
+    let dropped = range.normalize([-35])
+    expectClose(dropped[0], 0.9 * 46.0 / 50.0, tolerance: 1e-9, "reference falls by releasePerFrame")
+    // Silence stays at the bottom thanks to the minimum reference.
+    range.reset()
+    let silent = range.normalize([-100, -100])
+    expect(silent.allSatisfy { $0 == 0 }, "silence is not amplified")
+    expect(range.normalize([]).isEmpty, "empty frame stays empty")
+}
+
 // MARK: - Spectrum analyzer below 40 kHz
 
 /// The display bands run to 20 kHz. Below a 40 kHz sample rate the top bands
@@ -1936,6 +1975,8 @@ testTapRoutePlanning()
 testStereoScatter()
 testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
+testSpectrumSmoother()
+testSpectrumAutoRange()
 testEngineRestartDelayBacksOff()
 testCallbackStallCounting()
 testTapExclusion()
