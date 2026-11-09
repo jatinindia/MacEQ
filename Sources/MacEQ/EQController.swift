@@ -50,7 +50,8 @@ struct DeviceProfile: Codable {
 /// the entire popover (~99% CPU). Only the spectrum overlay observes this.
 @MainActor
 final class SpectrumModel: ObservableObject {
-    @Published var levelsDB: [Double] = []
+    /// Display heights in 0...1, already auto-ranged (SpectrumAutoRange).
+    @Published var levels: [Double] = []
 }
 
 /// Status/diagnostics text refreshed twice a second, isolated from EQController
@@ -1280,6 +1281,7 @@ final class EQController: ObservableObject {
     /// reading the same one or two bins.
     private let analyzer = SpectrumAnalyzer(fftSize: 4096)
     private var spectrumSmoother = SpectrumSmoother()
+    private var spectrumRange = SpectrumAutoRange()
     private var spectrumTimer: Timer?
 
     /// ~30 fps spectrum updates; runs only while a curve view is visible.
@@ -1287,6 +1289,7 @@ final class EQController: ObservableObject {
         guard spectrumTimer == nil else { return }
         engine.captureRing.captureEnabled = true
         spectrumSmoother.reset()
+        spectrumRange.reset()
         spectrumTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
@@ -1296,7 +1299,7 @@ final class EQController: ObservableObject {
                     sampleRate: self.currentSampleRate,
                     bandFrequencies: Self.spectrumBands
                 )
-                self.spectrum.levelsDB = self.spectrumSmoother.process(raw)
+                self.spectrum.levels = self.spectrumRange.normalize(self.spectrumSmoother.process(raw))
             }
         }
     }
@@ -1305,7 +1308,7 @@ final class EQController: ObservableObject {
         engine.captureRing.captureEnabled = false
         spectrumTimer?.invalidate()
         spectrumTimer = nil
-        spectrum.levelsDB = []
+        spectrum.levels = []
     }
 
     // MARK: - CPU usage

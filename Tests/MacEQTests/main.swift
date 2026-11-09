@@ -1087,6 +1087,23 @@ func testSpectrumSmoother() {
     expect((rise + 80) > (-40 - fall), "attack is faster than release")
 }
 
+func testSpectrumAutoRange() {
+    var range = SpectrumAutoRange(span: 50, headroom: 0.1, releasePerFrame: 1, minimumReferenceDB: -40)
+    // Quiet music (peak -30 dBFS) still reaches near the top.
+    let quiet = range.normalize([-30, -55, -80, -100])
+    expectClose(quiet[0], 0.9, tolerance: 1e-9, "loudest band sits below the headroom")
+    expectClose(quiet[1], 0.45, tolerance: 1e-9, "25 dB down is half the span")
+    expect(quiet[2] == 0 && quiet[3] == 0, "below the span is floored")
+    // Reference sinks slowly when the level drops.
+    let dropped = range.normalize([-35])
+    expectClose(dropped[0], 0.9 * 46.0 / 50.0, tolerance: 1e-9, "reference falls by releasePerFrame")
+    // Silence stays at the bottom thanks to the minimum reference.
+    range.reset()
+    let silent = range.normalize([-100, -100])
+    expect(silent.allSatisfy { $0 == 0 }, "silence is not amplified")
+    expect(range.normalize([]).isEmpty, "empty frame stays empty")
+}
+
 // MARK: - Spectrum analyzer below 40 kHz
 
 /// The display bands run to 20 kHz. Below a 40 kHz sample rate the top bands
@@ -1959,6 +1976,7 @@ testStereoScatter()
 testFiltersAtOrAboveNyquistPassThroughStably()
 testSpectrumAnalyzerAtLowSampleRates()
 testSpectrumSmoother()
+testSpectrumAutoRange()
 testEngineRestartDelayBacksOff()
 testCallbackStallCounting()
 testTapExclusion()

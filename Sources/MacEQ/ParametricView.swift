@@ -544,9 +544,9 @@ struct ResponseCurveView: View {
 }
 
 /// Live output spectrum, drawn as a soft filled curve behind the response
-/// curve. Spectrum dBFS (-80..0) maps onto the full plot height, a different
-/// scale than the response dB axis, purely for visualization. The levels
-/// arrive already smoothed (SpectrumSmoother); this draws them as a
+/// curve. Levels arrive smoothed (SpectrumSmoother) and auto-ranged to 0...1
+/// of the plot height (SpectrumAutoRange), a different scale than the
+/// response dB axis, purely for visualization. This draws them as a
 /// Catmull-Rom spline rather than straight segments.
 ///
 /// A separate view on purpose: it alone observes SpectrumModel, so the 30 fps
@@ -558,12 +558,11 @@ private struct SpectrumOverlay: View {
 
     var body: some View {
         Canvas { context, size in
-            let levels = spectrum.levelsDB
+            let levels = spectrum.levels
             guard levels.count == EQController.spectrumBands.count, levels.count > 1 else { return }
-            let floorDB = -80.0
             let logSpan = log(freqRange.upperBound / freqRange.lowerBound)
             let points = EQController.spectrumBands.enumerated().map { index, band in
-                let fraction = max(0, min(1, (levels[index] - floorDB) / -floorDB))
+                let fraction = max(0, min(1, levels[index]))
                 return CGPoint(
                     x: CGFloat(log(band / freqRange.lowerBound) / logSpan) * size.width,
                     y: size.height * CGFloat(1 - fraction)
